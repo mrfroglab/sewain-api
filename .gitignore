@@ -1,0 +1,8 @@
+bin/
+data/
+coverage.out
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
