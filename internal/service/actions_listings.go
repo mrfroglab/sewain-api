@@ -53,8 +53,13 @@ func (t *txn) updateListing(actor, listingID domain.ID, in domain.ListingInput) 
 	if err := domain.ValidateListing(&next, t.bannedKeywords()); err != nil {
 		return err
 	}
-	if next.Stock < 1 {
+	// Same rules as createListing: stock > 1 only for shop accounts, manual approval for high-value items and
+	// vehicles (PRD 11.4).
+	if owner := t.user(l.OwnerID); owner == nil || owner.AccountType != "toko" || next.Stock < 1 {
 		next.Stock = 1
+	}
+	if domain.NeedsManualApproval(&next, t.collateralRules()) {
+		next.Approval = "manual"
 	}
 	if next.RadiusKm <= 0 {
 		next.RadiusKm = l.RadiusKm

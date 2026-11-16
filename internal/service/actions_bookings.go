@@ -8,8 +8,9 @@ import (
 	"github.com/mrfroglab/sewain-api/internal/domain"
 )
 
-// committedOverlaps counts bookings holding stock on overlapping dates (FR-R4). The caller holds the listing lock,
-// so concurrent requests/acceptances for the same listing are serialized and see each other's commits.
+// committedOverlaps counts bookings holding stock on overlapping dates (FR-R4), including a DISPUTED one whose item
+// is still out. The caller holds the listing lock, so concurrent requests/acceptances for the same listing are
+// serialized and see each other's commits.
 func (t *txn) committedOverlaps(listingID, excludeID domain.ID, start, end string) int {
 	n, err := t.q.CountCommittedOverlaps(t.ctx, dbq.CountCommittedOverlapsParams{ListingID: listingID, ExcludeID: excludeID,
 		StartDate: dateOf(start), EndDate: dateOf(end)})
@@ -44,6 +45,9 @@ func (t *txn) createBooking(renterID domain.ID, in domain.BookingInput, wantID s
 	}
 	if in.StartDate < domain.IsoDate(t.now) {
 		return "", domain.Fail("Tanggal ambil sudah lewat.")
+	}
+	if in.EndDate > domain.AddDays(domain.IsoDate(t.now), domain.MaxRentalDays) {
+		return "", domain.Fail(fmt.Sprintf("Tanggal sewa maksimal %d hari dari sekarang.", domain.MaxRentalDays))
 	}
 	var collateral *domain.CollateralOption
 	for i := range l.CollateralOptions {
@@ -96,6 +100,9 @@ func (t *txn) acceptBooking(providerID, id domain.ID, meeting *string) error {
 	}
 	if b.Status != "REQUESTED" {
 		return domain.Fail("Request ini sudah tidak menunggu persetujuan.")
+	}
+	if t.now >= b.ExpiresAt { // FR-R3 holds even before the periodic job marks it EXPIRED
+		return domain.Fail("Request ini sudah kedaluwarsa.")
 	}
 	l := t.listingForUpdate(b.ListingID)
 	stock := 1
@@ -231,8 +238,10 @@ func (t *txn) submitCheckout(actor, id domain.ID, in domain.CheckoutInput) error
 	if len(in.CollateralPhotoIDs) < 1 {
 		return domain.Fail("Foto jaminan wajib (FR-J5).")
 	}
-	if !t.photosExist(append(append([]domain.ID{}, in.PhotoIDs...), in.CollateralPhotoIDs...)) {
+	if all := append(append([]domain.ID{}, in.PhotoIDs...), in.CollateralPhotoIDs...); !t.photosExist(all) {
 		return domain.Fail("Ada foto yang belum terunggah ke server. Coba lagi.")
+	} else if !t.evidenceOf(b, actor, all) {
+		return domain.Fail("Foto bukti harus diunggah untuk booking ini.")
 	}
 	l := t.listing(b.ListingID)
 	if l != nil && domain.IsVehicle(l.Category) && (domain.Deref(in.Odometer, "") == "" || domain.Deref(in.Fuel, "") == "") {
@@ -255,6 +264,9 @@ func (t *txn) addCheckoutPhotos(actor, id domain.ID, photoIDs []domain.ID) error
 	}
 	if !t.photosExist(photoIDs) {
 		return domain.Fail("Ada foto yang belum terunggah ke server. Coba lagi.")
+	}
+	if !t.evidenceOf(b, actor, photoIDs) {
+		return domain.Fail("Foto bukti harus diunggah untuk booking ini.")
 	}
 	b.Checkout.PhotoIDs = append(b.Checkout.PhotoIDs, photoIDs...)
 	b.Checkout.RenterAgreedAt = nil
@@ -333,6 +345,9 @@ func (t *txn) submitCheckin(actor, id domain.ID, in domain.CheckinInput) error {
 	if !t.photosExist(all) {
 		return domain.Fail("Ada foto yang belum terunggah ke server. Coba lagi.")
 	}
+	if !t.evidenceOf(b, actor, all) {
+		return domain.Fail("Foto bukti harus diunggah untuk booking ini.")
+	}
 	b.Status, b.ReturnedAt = "RETURNED", domain.Ptr(t.now)
 	b.Checkin = &domain.Checkin{PhotoIDs: all, Result: in.Result, ProblemType: in.ProblemType, ProblemNote: in.ProblemNote, Odometer: in.Odometer, Fuel: in.Fuel, At: t.now}
 	t.saveBooking(b)
@@ -380,14 +395,19 @@ func (t *txn) confirmCollateral(renterID, id domain.ID) error {
 	if b.CollateralReturn == nil || b.CollateralReturn.ProviderReturnedAt == nil {
 		return domain.Fail("Penyedia belum menandai jaminan dikembalikan.")
 	}
+	if b.CollateralReturn.RenterConfirmedAt != nil {
+		return domain.Fail("Jaminan sudah dikonfirmasi.")
+	}
 	completes := b.Status == "RETURNED"
 	b.CollateralReturn.RenterConfirmedAt = domain.Ptr(t.now)
 	if completes {
 		b.Status, b.CompletedAt = "COMPLETED", domain.Ptr(t.now)
 	}
 	t.saveBooking(b)
-	t.check(t.q.IncrementListingRentCount(t.ctx, b.ListingID))
-	t.touchPublic()
+	if completes { // a completed rental counts once (the auto-complete job counts the others)
+		t.check(t.q.IncrementListingRentCount(t.ctx, b.ListingID))
+		t.touchPublic()
+	}
 	title, body, msg := "Jaminan diterima penyewa", t.titleOf(b)+": penyewa mengonfirmasi jaminan sudah diterima.", "Penyewa mengonfirmasi jaminan diterima."
 	if completes {
 		title, body, msg = "Sewa selesai", body+" Beri rating, yuk.", "Penyewa mengonfirmasi jaminan diterima. Sewa SELESAI. Silakan saling memberi rating."
@@ -446,6 +466,9 @@ func (t *txn) sendMessage(senderID, id domain.ID, text *string, photoID *domain.
 	}
 	if photoID != nil && !t.photosExist([]domain.ID{*photoID}) {
 		return domain.Fail("Foto belum terunggah ke server. Coba lagi.")
+	}
+	if photoID != nil && !t.evidenceOf(b, senderID, []domain.ID{*photoID}) {
+		return domain.Fail("Foto bukti harus diunggah untuk booking ini.")
 	}
 	var txt *string
 	if clean != "" {

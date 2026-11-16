@@ -14,7 +14,8 @@ import (
 
 const countCommittedOverlaps = `-- name: CountCommittedOverlaps :one
 SELECT count(*)::int FROM bookings
-WHERE listing_id = $1 AND status IN ('ACCEPTED', 'ACTIVE') AND id <> $2
+WHERE listing_id = $1 AND (status IN ('ACCEPTED', 'ACTIVE') OR (status = 'DISPUTED' AND returned_at IS NULL))
+  AND id <> $2
   AND start_date <= $3 AND $4 <= end_date
 `
 
@@ -25,7 +26,8 @@ type CountCommittedOverlapsParams struct {
 	StartDate time.Time
 }
 
-// FR-R4: bookings that hold stock (ACCEPTED/ACTIVE) on overlapping dates.
+// FR-R4: bookings that hold stock on overlapping dates: ACCEPTED/ACTIVE, and DISPUTED while the item is still with the
+// renter (not returned), like listingBusy in the snapshot.
 func (q *Queries) CountCommittedOverlaps(ctx context.Context, arg CountCommittedOverlapsParams) (int, error) {
 	row := q.db.QueryRow(ctx, countCommittedOverlaps,
 		arg.ListingID,

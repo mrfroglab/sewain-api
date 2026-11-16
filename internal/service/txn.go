@@ -349,6 +349,20 @@ func (t *txn) photosExist(ids []domain.ID) bool {
 	return t.check(err) && n == len(list)
 }
 
+// evidenceOf reports whether every photo can serve as evidence on booking b for actor: uploaded for this booking (by
+// either party), or uploaded by the actor without a booking. Photos of other bookings (older condition, older server
+// timestamps), other users' loose photos and listing/KYC photos are refused (FR-P2/P3). Call after photosExist.
+func (t *txn) evidenceOf(b *domain.Booking, actor domain.ID, ids []domain.ID) bool {
+	if len(ids) == 0 {
+		return true
+	}
+	var bad bool
+	err := t.tx.QueryRow(t.ctx, `SELECT EXISTS (SELECT 1 FROM photos WHERE id = ANY($1)
+		AND (stage IN ('referensi', 'ktp', 'selfie') OR NOT (booking_id IS NOT DISTINCT FROM $2 OR (booking_id IS NULL AND uploader_id = $3))))`,
+		ids, b.ID, actor).Scan(&bad)
+	return t.check(err) && !bad
+}
+
 /* ---------------------------------------------------------- side effects */
 
 // notify is the single place that creates in-app notifications (hooks registered with Service.OnNotification run

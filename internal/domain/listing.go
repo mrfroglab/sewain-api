@@ -1,18 +1,101 @@
 package domain
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+	"unicode"
+)
 
-// BannedWordsIn: keyword filter for listings (FR-L4), whole-word, case-insensitive.
+// BannedWordsIn: keyword filter for listings (FR-L4), whole-word, case-insensitive. Text and keywords are folded the
+// same way (foldKeywordRune: full-width forms, accents, Cyrillic/Greek look-alikes). The text is read twice: split
+// at every non-letter/digit (the plain whole-word match), and compacted (punctuation and invisible characters inside
+// a word removed, runs of single spaced letters joined), so "A.I.R.S.O.F.T", "air-soft", "a i r s o f t" or a
+// zero-width space do not hide a keyword, while words that merely contain it ("airy software") still pass.
 func BannedWordsIn(text string, banned []string) []string {
-	norm := " " + strings.Join(strings.FieldsFunc(strings.ToLower(text), func(r rune) bool { return (r < 'a' || r > 'z') && (r < '0' || r > '9') }), " ") + " "
+	folded := foldKeywordText(text)
+	plain := " " + strings.Join(alnumWords(folded), " ") + " "
+	compact := " " + strings.Join(compactWords(folded), " ") + " "
 	var out []string
-	for _, w := range banned {
-		w = strings.ToLower(strings.TrimSpace(w))
-		if w != "" && strings.Contains(norm, " "+w+" ") {
-			out = append(out, w)
+	for _, b := range banned {
+		words := alnumWords(foldKeywordText(b))
+		if len(words) == 0 {
+			continue
+		}
+		phrase, glued := " "+strings.Join(words, " ")+" ", " "+strings.Join(words, "")+" "
+		if strings.Contains(plain, phrase) || strings.Contains(compact, phrase) || strings.Contains(compact, glued) {
+			out = append(out, strings.ToLower(strings.TrimSpace(b)))
 		}
 	}
 	return out
+}
+
+func isKeywordRune(r rune) bool { return (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') }
+
+func alnumWords(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool { return !isKeywordRune(r) })
+}
+
+// compactWords drops everything but letters, digits and spaces, then joins runs of one-letter words.
+func compactWords(s string) []string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case isKeywordRune(r):
+			b.WriteRune(r)
+		case unicode.IsSpace(r):
+			b.WriteByte(' ')
+		}
+	}
+	var out []string
+	run := ""
+	for _, w := range strings.Fields(b.String()) {
+		if len(w) == 1 {
+			run += w
+			continue
+		}
+		if run != "" {
+			out, run = append(out, run), ""
+		}
+		out = append(out, w)
+	}
+	if run != "" {
+		out = append(out, run)
+	}
+	return out
+}
+
+func foldKeywordText(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		b.WriteRune(foldKeywordRune(r))
+	}
+	return b.String()
+}
+
+// keywordFold maps accented Latin letters and Cyrillic/Greek look-alikes (lower case) to ASCII.
+var keywordFold = func() map[rune]rune {
+	m := map[rune]rune{}
+	for to, from := range map[rune]string{
+		'a': "àáâãäåāăąǎạảấầẩẫậắằẳẵặаα", 'b': "вβ", 'c': "çćĉċčс", 'd': "ďđ", 'e': "èéêëēĕėęěẹẻẽếềểễệеεё",
+		'g': "ĝğġģ", 'h': "ĥħн", 'i': "ìíîïĩīĭįıǐỉịіїι", 'j': "ĵј", 'k': "ķкκ", 'l': "ĺļľŀł", 'm': "м",
+		'n': "ñńņňŉη", 'o': "òóôõöøōŏőǒọỏốồổỗộớờởỡợоο", 'p': "рρ", 'r': "ŕŗř", 's': "śŝşšѕ", 't': "ţťŧтτ",
+		'u': "ùúûüũūŭůűųǔưụủứừửữựυ", 'v': "ν", 'w': "ŵ", 'x': "хχ", 'y': "ýÿŷỳỵỷỹу", 'z': "źżž",
+	} {
+		for _, r := range from {
+			m[r] = to
+		}
+	}
+	return m
+}()
+
+func foldKeywordRune(r rune) rune {
+	if r >= 0xFF01 && r <= 0xFF5E { // full-width ASCII
+		r = unicode.ToLower(r - 0xFEE0)
+	}
+	if to, ok := keywordFold[r]; ok {
+		return to
+	}
+	return r
 }
 
 // ApplyListing merges a create/update payload into a listing (same semantics as the web store).
@@ -86,7 +169,10 @@ func ValidateListing(l *Listing, banned []string) error {
 	case IsVehicle(l.Category) && l.Vehicle == nil:
 		return Fail("Kendaraan wajib mengisi data STNK.")
 	}
-	if words := BannedWordsIn(l.Title+" "+l.Description, banned); len(words) > 0 {
+	if err := validateListingBounds(l); err != nil {
+		return err
+	}
+	if words := BannedWordsIn(strings.Join([]string{l.Title, l.Description, l.ConditionNotes, Deref(l.Rules.Special, "")}, "\n"), banned); len(words) > 0 {
 		return Fail("Ada kata yang dilarang: " + strings.Join(words, ", ") + ".")
 	}
 	return nil
@@ -95,4 +181,96 @@ func ValidateListing(l *Listing, banned []string) error {
 // NeedsManualApproval: high-value items and vehicles always need manual approval (PRD 11.4).
 func NeedsManualApproval(l *Listing, rules CollateralRules) bool {
 	return IsVehicle(l.Category) || l.ItemValue > rules.HighValueBadge
+}
+
+// Bounds of listing input (review wave 2, M1). Money is integer rupiah; MaxRupiah keeps price × days (≤ MaxRentalDays)
+// far from int64 overflow and is above any item rented peer to peer.
+const MaxRupiah int64 = 10_000_000_000 // Rp10 miliar
+
+const (
+	MaxRentalDays     = 365
+	MaxListingStock   = 1000
+	MaxListingRadius  = 50 // km, like the search and the CSV import
+	maxListingPhotos  = 20
+	maxCollateralOpts = 10
+)
+
+// textLimits are the longest texts a listing may carry (runes).
+var textLimits = []struct {
+	name string
+	max  int
+	get  func(*Listing) string
+}{
+	{"Judul", 120, func(l *Listing) string { return l.Title }},
+	{"Deskripsi", 5000, func(l *Listing) string { return l.Description }},
+	{"Catatan kondisi", 2000, func(l *Listing) string { return l.ConditionNotes }},
+	{"Titik temu", 200, func(l *Listing) string { return Deref(l.MeetingPoint, "") }},
+	{"Jam serah terima", 200, func(l *Listing) string { return Deref(l.HandoverHours, "") }},
+	{"Kebijakan pembatalan", 500, func(l *Listing) string { return l.Rules.Cancellation }},
+	{"Aturan khusus", 2000, func(l *Listing) string { return Deref(l.Rules.Special, "") }},
+}
+
+func validateListingBounds(l *Listing) error {
+	for _, t := range textLimits {
+		if n := len([]rune(t.get(l))); n > t.max {
+			return Fail(fmt.Sprintf("%s terlalu panjang (maks %d karakter).", t.name, t.max))
+		}
+	}
+	money := func(v int64) bool { return v > 0 && v <= MaxRupiah }
+	optMoney := func(v *int64) bool { return v == nil || money(*v) }
+	switch {
+	case !money(l.PricePerDay) || !optMoney(l.PricePerHour) || !optMoney(l.PricePerWeek):
+		return Fail("Harga sewa tidak valid.")
+	case l.ItemValue > MaxRupiah:
+		return Fail("Nilai barang terlalu besar.")
+	case l.Rules.LateFeePerDay < 0 || l.Rules.LateFeePerDay > MaxRupiah:
+		return Fail("Denda telat per hari tidak valid.")
+	case l.Rules.LateFeeCapPercent < 0 || l.Rules.LateFeeCapPercent > 100:
+		return Fail("Batas denda telat maksimal 100% nilai barang.")
+	case l.DurationDiscount != nil && (l.DurationDiscount.Percent <= 0 || l.DurationDiscount.Percent >= 100 ||
+		l.DurationDiscount.MinDays < 1 || l.DurationDiscount.MinDays > MaxRentalDays):
+		return Fail("Diskon durasi tidak valid (lebih dari 0% dan kurang dari 100%).")
+	case l.MinDays != nil && (*l.MinDays < 1 || *l.MinDays > MaxRentalDays),
+		l.MaxDays != nil && (*l.MaxDays < 1 || *l.MaxDays > MaxRentalDays),
+		l.MinDays != nil && l.MaxDays != nil && *l.MinDays > *l.MaxDays:
+		return Fail(fmt.Sprintf("Minimal/maksimal hari sewa tidak valid (1–%d hari).", MaxRentalDays))
+	case l.RadiusKm > MaxListingRadius:
+		return Fail(fmt.Sprintf("Jangkauan maksimal %d km.", MaxListingRadius))
+	case l.Stock > MaxListingStock:
+		return Fail(fmt.Sprintf("Stok maksimal %d unit.", MaxListingStock))
+	case l.AutoApproveMinRating != nil && (*l.AutoApproveMinRating < 1 || *l.AutoApproveMinRating > 5):
+		return Fail("Ambang rating persetujuan otomatis 1–5.")
+	case l.Location.Lat < -90 || l.Location.Lat > 90 || l.Location.Lng < -180 || l.Location.Lng > 180:
+		return Fail("Lokasi tidak valid.")
+	case len(l.Photos) > maxListingPhotos:
+		return Fail(fmt.Sprintf("Maksimal %d foto barang.", maxListingPhotos))
+	case len(l.CollateralOptions) > maxCollateralOpts:
+		return Fail(fmt.Sprintf("Maksimal %d bentuk jaminan.", maxCollateralOpts))
+	}
+	for _, h := range l.Handover {
+		if h != "cod" && h != "jemput" && h != "kurir" && h != "antar" { // web: cod | jemput | kurir; CSV import: antar
+			return Fail("Cara serah terima tidak dikenal.")
+		}
+	}
+	for _, o := range l.CollateralOptions {
+		bad := false
+		switch o.Kind {
+		case "identitas":
+		case "deposit":
+			if Deref(o.DepositMode, "") == "persen" {
+				p := Deref(o.DepositPercent, 0)
+				bad = p <= 0 || p > 100
+			} else {
+				bad = !optMoney(o.DepositAmount) || o.DepositAmount == nil
+			}
+		case "barang", "custom":
+			bad = o.EstimatedValue != nil && (*o.EstimatedValue < 0 || *o.EstimatedValue > MaxRupiah)
+		default:
+			bad = true
+		}
+		if bad || len([]rune(Deref(o.Description, ""))) > 500 {
+			return Fail("Bentuk jaminan tidak valid (deposit lebih dari 0 dan maksimal 100% nilai barang).")
+		}
+	}
+	return nil
 }

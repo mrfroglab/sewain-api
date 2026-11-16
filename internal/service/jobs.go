@@ -50,6 +50,8 @@ func (t *txn) runJobs() {
 			b.CompletedAt = domain.Ptr(now)
 			b.CompletedAuto = domain.Ptr(true)
 			t.saveBooking(b)
+			t.check(t.q.IncrementListingRentCount(t.ctx, b.ListingID))
+			t.touchPublic()
 			t.notify(b.RenterID, "booking", "Sewa selesai otomatis", t.titleOf(b)+": tidak ada konfirmasi jaminan dalam 48 jam, status otomatis selesai. Beri rating, yuk.", domain.BookingHref(b))
 			t.notify(b.ProviderID, "booking", "Sewa selesai", t.titleOf(b)+" selesai otomatis setelah 48 jam.", domain.BookingHref(b))
 			t.sysMsg(b.ID, "Penyewa tidak merespons dalam 48 jam. Status otomatis SELESAI.")
