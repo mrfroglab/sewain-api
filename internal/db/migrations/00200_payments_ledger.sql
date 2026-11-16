@@ -110,8 +110,8 @@ WITH snap AS (
     FROM ledger_balance_snapshots ORDER BY account, last_entry_id DESC
 )
 SELECT a.account,
-       coalesce(s.balance, 0) + coalesce((SELECT sum(e.amount) FROM ledger_entries e
-                                          WHERE e.account = a.account AND e.id > coalesce(s.last_entry_id, 0)), 0)
+       (coalesce(s.balance, 0) + coalesce((SELECT sum(e.amount) FROM ledger_entries e
+                                           WHERE e.account = a.account AND e.id > coalesce(s.last_entry_id, 0)), 0))::bigint
            AS balance
 FROM (SELECT DISTINCT account FROM ledger_entries) a
 LEFT JOIN snap s ON s.account = a.account;
