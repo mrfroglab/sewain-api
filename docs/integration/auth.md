@@ -29,7 +29,7 @@ Buat kunci dan pepper dengan `openssl rand -base64 32` (32 byte acak, base64).
 | `ALLOWED_ORIGINS` | ya di production | kosong (dev: host request sendiri) | Daftar origin dipisah koma, mis. `https://sewain.me,https://www.sewain.me`. Dipakai untuk cek CSRF |
 | `TERMS_VERSION`, `PRIVACY_VERSION` | ya di production | `draft` | Versi dokumen yang dicatat ke `consents` saat akun baru dibuat |
 | `SESSION_BEARER_LOGIN` | tidak | sama dengan `DEMO_MODE` | Mengizinkan `transport:"bearer"` di verify (token di body, untuk demo multi-akun per tab, D6). Ditolak di production |
-| `CLIENT_IP_HEADER` | disarankan | kosong (pakai `RemoteAddr`) | Header IP klien yang dipercaya untuk rate limit per IP. Di server ini (Cloudflare Tunnel → Caddy) pakai `CF-Connecting-IP`. Jangan diisi kalau proxy tidak menimpa header itu |
+| `CLIENT_IP_HEADER` | cadangan | kosong (pakai `RemoteAddr`) | Hanya dipakai kalau rantai platform (`middleware.RealIP` + `TRUSTED_PROXY_CIDRS`) tidak berjalan; kalau berjalan, IP dari `RealIP` yang dipakai. Untuk `X-Forwarded-For` diambil hop **terakhir**. Rate limit per IP menghitung IPv6 per /64 (`otp_challenges.ip` berisi prefiks /64 untuk IPv6) |
 
 Variabel Zenziva (hanya kalau `OTP_PROVIDER=zenziva`):
 
@@ -85,6 +85,9 @@ handler := cors(authSvc.Middleware(mux)) // middleware membungkus SELURUH mux
 - Ambil viewer di handler inti: `v := auth.ViewerFrom(r.Context())`. `v.IsGuest()`, `v.IsAdmin()`.
 - **CSRF:** request berbasis cookie dengan metode selain GET/HEAD/OPTIONS wajib punya `Origin` (atau `Referer`)
   yang ada di `ALLOWED_ORIGINS`, kalau tidak 403 `{"ok":false,"error":"Permintaan ditolak: asal permintaan tidak dikenal."}`.
+  `Origin: null` selalu ditolak (tidak jatuh ke `Referer`). Request tanpa cookie dan tanpa bearer (mis. `/otp/verify`)
+  yang membawa `Origin` asing juga ditolak 403 (login CSRF); klien tanpa header `Origin` (aplikasi, curl) tetap
+  boleh. Jadi origin aplikasi mobile/Capacitor (`capacitor://localhost`, dll.) harus masuk `ALLOWED_ORIGINS`.
   Request bearer tidak dicek. CORS inti tetap perlu `AllowCredentials` untuk origin web kalau web dan API beda origin.
 - Penjaga: `auth.RequireUser(h)`, `auth.RequireAdmin(h)` (401 tamu, 403 non-admin "Hanya admin."), dan untuk
   kode service (mis. dispatcher `POST /api/v1/actions/{name}` untuk aksi admin) `auth.CheckAdmin(v) error`.

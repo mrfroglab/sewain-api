@@ -585,3 +585,39 @@ func TestMiddlewareRecordsUserForPlatform(t *testing.T) {
 		t.Fatalf("middleware.UserIDFrom = %q, want %q", got, v.UserID)
 	}
 }
+
+// Finding A5a: with "Origin: null" (sandboxed iframe, cross-origin redirect chain, data: URL) the check fell
+// back to the Referer. The opaque origin is exactly the case where the browser hides the real initiator,
+// so null must be refused, not re-derived from a header the initiating context controls.
+func TestCSRFRejectsNullOrigin(t *testing.T) {
+	h := newHTTP(t)
+	tok := h.login(t, "081244440000").Token
+	hdr := map[string]string{"Cookie": auth.SessionCookieName + "=" + tok, "Origin": "null", "Referer": "https://sewain.example/akun"}
+	if resp, _ := h.do(t, "POST", "/api/v1/things", `{}`, hdr); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("Origin null + allowed Referer: %d, want 403", resp.StatusCode)
+	}
+}
+
+// Finding A5b: login CSRF. Requests without a session cookie skipped the Origin check, and the JSON decoder
+// ignores Content-Type, so a page on any site could auto-submit a text/plain form to /otp/verify with the
+// attacker's own phone and code and sign the victim's browser into the attacker's account (whatever the
+// victim then uploads, e.g. KTP photos, lands there). A browser always sends Origin on a cross-site POST, so
+// an Origin that is present but not allowed is now refused even without a cookie.
+func TestCSRFLoginFromForeignOriginRefused(t *testing.T) {
+	h := newHTTP(t)
+	_, out := h.do(t, "POST", "/api/v1/auth/otp/request", `{"phone":"081244440001"}`, nil)
+	body := `{"phone":"081244440001","code":"` + out["devCode"].(string) + `","acceptTerms":true,"x":"="}`
+	evil := map[string]string{"Origin": "https://evil.example", "Content-Type": "text/plain"}
+	resp, _ := h.do(t, "POST", "/api/v1/auth/otp/verify", body, evil)
+	if resp.StatusCode != http.StatusForbidden || sessionCookie(resp) != nil {
+		t.Fatalf("cross-site login: %d cookie=%v, want 403 without cookie", resp.StatusCode, sessionCookie(resp))
+	}
+	// Non-browser clients (no Origin) and the real web app still work.
+	if resp, _ := h.do(t, "POST", "/api/v1/auth/otp/verify", body, map[string]string{"Origin": "https://sewain.example"}); resp.StatusCode != 200 {
+		t.Fatalf("same-site login: %d", resp.StatusCode)
+	}
+	h.clock.Advance(auth.OTPResendGap)
+	if resp, _ := h.do(t, "POST", "/api/v1/auth/otp/request", `{"phone":"081244440002"}`, nil); resp.StatusCode != 200 {
+		t.Fatalf("request without Origin: %d", resp.StatusCode)
+	}
+}

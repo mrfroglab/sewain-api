@@ -27,8 +27,9 @@ func ViewerFrom(ctx context.Context) Viewer {
 // Middleware resolves the viewer from "Authorization: Bearer <token>" or the sewain_session cookie and stores
 // it in the request context. Invalid or expired credentials make the request a guest request (handlers decide
 // with RequireUser/RequireAdmin). Cookie-authenticated state-changing requests must carry an Origin (or
-// Referer) from AllowedOrigins, otherwise they are rejected with 403 (CSRF, D6). Bearer requests are exempt
-// because browsers never attach that header cross-site on their own.
+// Referer) from AllowedOrigins, otherwise they are rejected with 403 (CSRF, D6). Credential-less
+// state-changing requests that carry a foreign Origin are rejected too (login CSRF). Bearer requests are
+// exempt because browsers never attach that header cross-site on their own.
 func (s *Service) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, fromCookie := bearerToken(r), false
@@ -37,7 +38,11 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 				token, fromCookie = c.Value, true
 			}
 		}
-		if fromCookie && !safeMethod(r.Method) && !s.OriginAllowed(r) {
+		// Cookie-authenticated mutations need an allowed Origin/Referer. Cookieless, non-bearer mutations (the
+		// OTP login endpoints) are refused when a browser names a foreign origin, which stops login CSRF;
+		// clients that send no Origin at all (apps, curl) are unaffected.
+		checkOrigin := fromCookie || (token == "" && r.Header.Get("Origin") != "")
+		if checkOrigin && !safeMethod(r.Method) && !s.OriginAllowed(r) {
 			WriteError(w, userErr(http.StatusForbidden, MsgBadOrigin))
 			return
 		}
@@ -80,10 +85,14 @@ func safeMethod(m string) bool {
 
 // OriginAllowed reports whether the request's Origin (or, without Origin, its Referer) is one of the
 // configured AllowedOrigins. With no AllowedOrigins configured (development), the request's own host is
-// accepted.
+// accepted. "Origin: null" is never allowed.
 func (s *Service) OriginAllowed(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
-	if origin == "" || origin == "null" {
+	if origin == "null" {
+		// Opaque origin (sandboxed frame, cross-origin redirect): the browser hides the initiator on purpose.
+		return false
+	}
+	if origin == "" {
 		ref := r.Header.Get("Referer")
 		if ref == "" {
 			return false
