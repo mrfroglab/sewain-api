@@ -272,13 +272,13 @@ func (a *App) RunRetention(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		real := a.now()
+		realNow := a.now()
 		step("evidence-photos", func() (int64, error) {
 			n, err := a.Svc.PurgeEvidencePhotos(ctx, a.retentionStorage, demoNow)
 			return int64(n), err
 		})
 		step("kyc-files", func() (int64, error) {
-			n, err := a.KYC.PurgeFiles(ctx, real)
+			n, err := a.KYC.PurgeFiles(ctx, realNow)
 			return int64(n), err
 		})
 		step("kyc-deleted-accounts", func() (int64, error) {
@@ -291,10 +291,10 @@ func (a *App) RunRetention(ctx context.Context) error {
 			}
 			return n, err
 		})
-		step("kyc-stale-alert", func() (int64, error) { return a.Svc.AlertStaleKYC(ctx, real) })
-		step("outbox", func() (int64, error) { return a.Svc.PurgeOutbox(ctx, real) })
-		step("sessions", func() (int64, error) { return a.Auth.PurgeExpiredSessions(ctx, real.Add(-7*24*time.Hour)) })
-		step("otp", func() (int64, error) { return a.Auth.PurgeOTPChallenges(ctx, real.Add(-24*time.Hour)) })
+		step("kyc-stale-alert", func() (int64, error) { return a.Svc.AlertStaleKYC(ctx, realNow) })
+		step("outbox", func() (int64, error) { return a.Svc.PurgeOutbox(ctx, realNow) })
+		step("sessions", func() (int64, error) { return a.Auth.PurgeExpiredSessions(ctx, realNow.Add(-7*24*time.Hour)) })
+		step("otp", func() (int64, error) { return a.Auth.PurgeOTPChallenges(ctx, realNow.Add(-24*time.Hour)) })
 		step("idempotency", func() (int64, error) { return 0, a.Svc.Housekeeping(ctx) })
 		step("notifications", func() (int64, error) { return a.Svc.PurgeReadNotifications(ctx, demoNow) })
 		return errors.Join(errs...)

@@ -175,7 +175,7 @@ func (s *Server) Routes() http.Handler {
 		middleware.BodyLimit(middleware.DefaultBodyLimit,
 			middleware.BodyRule{Method: http.MethodPost, Path: "/api/v1/photos", Limit: middleware.UploadBodyLimit},
 			middleware.BodyRule{Method: http.MethodPost, Path: "/api/v1/kyc/submissions", Limit: 2*kyc.MaxFileBytes + 1<<20},
-			middleware.BodyRule{Method: http.MethodPost, Path: "/api/v1/admin/listings/import", Limit: 5 << 20},
+			middleware.BodyRule{Method: http.MethodPost, Path: "/api/v1/admin/listings/import", Limit: importBodyLimit},
 		),
 		middleware.Timeout(s.cfg.RequestTimeout, middleware.TimeoutOptions{}),
 		clientAddr,

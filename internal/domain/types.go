@@ -212,15 +212,15 @@ type Agreement struct {
 }
 
 type PaymentInfo struct {
-	Status     string  `json:"status"` // belum | lunas
-	Method     *string `json:"method,omitempty"` // qris | va | ewallet | tunai (simulated) | langsung (offline)
-	PaidAt     *int64  `json:"paidAt,omitempty"`
+	Status string  `json:"status"`           // belum | lunas
+	Method *string `json:"method,omitempty"` // qris | va | ewallet | tunai (simulated) | langsung (offline)
+	PaidAt *int64  `json:"paidAt,omitempty"`
 	// ConfirmedAt: the provider confirmed receiving a direct ("langsung") payment (PAYMENT_MODE=offline).
 	ConfirmedAt *int64 `json:"confirmedAt,omitempty"`
-	Rent       int64   `json:"rent"`
-	Deposit    int64   `json:"deposit"`
-	Commission int64   `json:"commission"`
-	Total      int64   `json:"total"`
+	Rent        int64  `json:"rent"`
+	Deposit     int64  `json:"deposit"`
+	Commission  int64  `json:"commission"`
+	Total       int64  `json:"total"`
 }
 
 type Checkout struct {

@@ -7,8 +7,8 @@ import (
 )
 
 func TestCommission(t *testing.T) {
-	min, max := int64(2000), int64(50000)
-	c := domain.CommissionConfig{Active: false, Mode: "persen", Percent: 10, Min: &min, Max: &max, Bearer: "split", SplitRenterPercent: 50}
+	lo, hi := int64(2000), int64(50000)
+	c := domain.CommissionConfig{Active: false, Mode: "persen", Percent: 10, Min: &lo, Max: &hi, Bearer: "split", SplitRenterPercent: 50}
 	s := domain.ComputeCommission(15000, c)
 	if s.Amount != 2000 || s.Charged != 0 {
 		t.Fatalf("min applies and nothing is charged in pilot: %+v", s)

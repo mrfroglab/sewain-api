@@ -74,7 +74,7 @@ func healthcheck() error {
 		port = "8080"
 	}
 	c := http.Client{Timeout: 3 * time.Second}
-	res, err := c.Get("http://127.0.0.1:" + port + "/api/health")
+	res, err := c.Get("http://127.0.0.1:" + port + "/api/health") // #nosec G704 -- loopback only; the port comes from the operator env
 	if err != nil {
 		return err
 	}
@@ -211,7 +211,9 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	go func() { errc <- server.Run(srvCtx, api, server.Options{Name: "api", Log: log}) }()
 	if cfg.MetricsAddr != "" {
 		servers++
-		go func() { errc <- server.Run(srvCtx, metrics.NewServer(cfg.MetricsAddr, m), server.Options{Name: "metrics", Log: log}) }()
+		go func() {
+			errc <- server.Run(srvCtx, metrics.NewServer(cfg.MetricsAddr, m), server.Options{Name: "metrics", Log: log})
+		}()
 	}
 	var first error
 	for i := 0; i < servers; i++ {

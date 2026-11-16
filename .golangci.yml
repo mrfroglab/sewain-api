@@ -60,15 +60,6 @@ linters:
       # Tests may ignore errors from fixtures and use fixed fake secrets.
       - path: _test\.go
         linters: [errcheck, gosec, bodyclose]
-    paths:
-      # TODO(core-v2): v1 packages are being rewritten by the core-v2 worker. Remove each exclusion once its
-      # package passes lint; only internal/platform and new packages are linted until then.
-      - ^cmd/
-      - ^internal/config/
-      - ^internal/domain/
-      - ^internal/httpapi/
-      - ^internal/seed/
-      - ^internal/store/
 
 formatters:
   enable:

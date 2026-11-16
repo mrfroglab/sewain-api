@@ -69,7 +69,7 @@ type Service struct {
 	opt  Options
 	log  *slog.Logger
 
-	mu        sync.RWMutex
+	mu          sync.RWMutex
 	listeners   []func(Change)
 	txListeners []func(context.Context, pgx.Tx, Change) error
 	notifiers   []func(context.Context, pgx.Tx, *domain.Notification) error

@@ -32,7 +32,7 @@ type Config struct {
 	UploadDir   string
 	WebOrigin   string // used to fetch bundled demo photos for hashing (e.g. http://sewain-web:3000)
 	CORSOrigins []string
-	// SnapshotScope: "scoped" (default, per viewer, ROADMAP §4) or "full" (v1 behaviour, DEMO_MODE only).
+	// SnapshotScope: "scoped" (default, per viewer, ROADMAP §4) or "full" (v1 behavior, DEMO_MODE only).
 	SnapshotScope string
 	// MigrateOnStart applies pending goose migrations at startup (under an advisory lock). Default true.
 	MigrateOnStart bool

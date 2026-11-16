@@ -136,7 +136,7 @@ func New(t *testing.T, opt Options) *API {
 			Auth:   ratelimit.Profile{Name: "auth", Rate: big, Key: ratelimit.ByIP},
 		}
 	}
-	var logOut io.Writer = io.Discard
+	logOut := io.Writer(io.Discard)
 	if os.Getenv("APPTEST_LOG") != "" {
 		logOut = os.Stderr
 	}
@@ -221,7 +221,7 @@ func (a *API) Do(s *Session, r Req) Resp {
 		req.Header.Set("Authorization", "Bearer "+s.Token)
 	}
 	if s != nil && s.Cookie != "" {
-		req.AddCookie(&http.Cookie{Name: "sewain_session", Value: s.Cookie})
+		req.AddCookie(&http.Cookie{Name: "sewain_session", Value: s.Cookie, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
 		if !r.NoOrigin {
 			req.Header.Set("Origin", Origin)
 		}

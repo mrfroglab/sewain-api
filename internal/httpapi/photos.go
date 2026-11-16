@@ -58,7 +58,7 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 	// so a 304 never hides a newer state.
 	w.Header().Set("ETag", windowed(s.svc.ETagFor(viewer, snap.Version, snap.ClockOffset), window))
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_, _ = w.Write(b)
+	_, _ = w.Write(b) // #nosec G705 -- JSON (Content-Type application/json, nosniff), not HTML
 }
 
 func windowed(etag string, window int64) string {
@@ -106,7 +106,8 @@ func (s *Server) uploadPhoto(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "Masuk dulu untuk mengunggah foto.")
 		return
 	}
-	if err := r.ParseMultipartForm(1 << 20); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, middleware.UploadBodyLimit)
+	if err := r.ParseMultipartForm(1 << 20); err != nil { // #nosec G120 -- body capped by MaxBytesReader above (12 MB), 1 MB in memory
 		if middleware.IsBodyTooLarge(err) {
 			writeErr(w, http.StatusRequestEntityTooLarge, "Foto terlalu besar (maks 10 MB).")
 			return

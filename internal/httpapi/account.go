@@ -73,9 +73,11 @@ func (s *Server) adminMetrics(w http.ResponseWriter, r *http.Request) {
 func (s *Server) importListings(w http.ResponseWriter, r *http.Request) {
 	v := viewerOf(r)
 	dry := isTrue(r.URL.Query().Get("dryRun"))
-	var src io.Reader = r.Body
+	var src io.Reader
+	r.Body = http.MaxBytesReader(w, r.Body, importBodyLimit)
+	src = r.Body
 	if ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); ct == "multipart/form-data" {
-		if err := r.ParseMultipartForm(1 << 20); err != nil {
+		if err := r.ParseMultipartForm(1 << 20); err != nil { // #nosec G120 -- body capped by MaxBytesReader above (5 MB), 1 MB in memory
 			if middleware.IsBodyTooLarge(err) {
 				middleware.RespondTooLarge(w)
 				return
@@ -114,6 +116,9 @@ func (s *Server) importListings(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, status, body)
 }
+
+// importBodyLimit bounds a CSV import (also enforced by the BodyLimit middleware rule).
+const importBodyLimit = 5 << 20
 
 func isTrue(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {

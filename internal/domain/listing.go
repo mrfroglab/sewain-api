@@ -4,7 +4,7 @@ import "strings"
 
 // BannedWordsIn: keyword filter for listings (FR-L4), whole-word, case-insensitive.
 func BannedWordsIn(text string, banned []string) []string {
-	norm := " " + strings.Join(strings.FieldsFunc(strings.ToLower(text), func(r rune) bool { return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9') }), " ") + " "
+	norm := " " + strings.Join(strings.FieldsFunc(strings.ToLower(text), func(r rune) bool { return (r < 'a' || r > 'z') && (r < '0' || r > '9') }), " ") + " "
 	var out []string
 	for _, w := range banned {
 		w = strings.ToLower(strings.TrimSpace(w))

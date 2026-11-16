@@ -114,7 +114,7 @@ func TestSearchRadiusSnapsToOptions(t *testing.T) {
 }
 
 // TestSearchCannotTrilateratePreciseLocation plays the attack from review C1: binary-search the edge of the 1 km
-// search circle along three rays, then take the circumcentre of the three edge points. Before the fix this recovered
+// search circle along three rays, then take the circumcenter of the three edge points. Before the fix this recovered
 // the precise location; now it recovers the public (fuzzed) point, which is > 150 m away from the precise one.
 func TestSearchCannotTrilateratePreciseLocation(t *testing.T) {
 	e := newEnv(t)
@@ -133,7 +133,7 @@ func TestSearchCannotTrilateratePreciseLocation(t *testing.T) {
 	if target == nil {
 		t.Fatal("no seed listing with a public point > 200 m from its precise point")
 	}
-	// Local plane (metres) around the public point.
+	// Local plane (meters) around the public point.
 	const m = 111_320.0
 	cos := math.Cos(pubLat * math.Pi / 180)
 	toLatLng := func(x, y float64) (float64, float64) { return pubLat + y/m, pubLng + x/(m*cos) }
@@ -160,7 +160,7 @@ func TestSearchCannotTrilateratePreciseLocation(t *testing.T) {
 		}
 		pts[i] = [2]float64{ux * lo, uy * lo}
 	}
-	// Circumcentre of the three edge points = the centre the search measures from.
+	// Circumcenter of the three edge points = the center the search measures from.
 	ax, ay, bx, by, cx, cy := pts[0][0], pts[0][1], pts[1][0], pts[1][1], pts[2][0], pts[2][1]
 	d := 2 * (ax*(by-cy) + bx*(cy-ay) + cx*(ay-by))
 	ex := ((ax*ax+ay*ay)*(by-cy) + (bx*bx+by*by)*(cy-ay) + (cx*cx+cy*cy)*(ay-by)) / d

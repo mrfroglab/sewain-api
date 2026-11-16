@@ -114,7 +114,7 @@ func (c *wsClient) changed() int {
 	return n
 }
 
-func dial(t *testing.T, ctx context.Context, a *apptest.API, token string) *wsClient {
+func dial(ctx context.Context, t *testing.T, a *apptest.API, token string) *wsClient {
 	t.Helper()
 	url := strings.Replace(a.Base, "http", "ws", 1) + "/api/v1/events"
 	if token != "" {
@@ -149,7 +149,7 @@ func TestEventsOnlyToParties(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	raka, dina, sinta, adm := a.DemoLogin("u-raka"), a.DemoLogin("u-dina"), a.DemoLogin("u-sinta"), a.DemoLogin("u-admin")
-	wr, wd, ws, wa, wg := dial(t, ctx, a, raka.Token), dial(t, ctx, a, dina.Token), dial(t, ctx, a, sinta.Token), dial(t, ctx, a, adm.Token), dial(t, ctx, a, "")
+	wr, wd, ws, wa, wg := dial(ctx, t, a, raka.Token), dial(ctx, t, a, dina.Token), dial(ctx, t, a, sinta.Token), dial(ctx, t, a, adm.Token), dial(ctx, t, a, "")
 	a.OK(raka, "sendMessage", "u-raka", "b-accepted", map[string]any{"text": "Besok jam 9 ya"})
 	waitFor(t, "event to both parties and the admin", func() bool { return wr.changed() == 1 && wd.changed() == 1 && wa.changed() == 1 })
 	time.Sleep(300 * time.Millisecond)

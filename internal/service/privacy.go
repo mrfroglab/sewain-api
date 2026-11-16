@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"strings"
 
-
 	"github.com/mrfroglab/sewain-api/internal/domain"
 )
 
