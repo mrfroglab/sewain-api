@@ -44,6 +44,7 @@ browser ─► Cloudflare Tunnel ─► Caddy ─► api :8080 ─┬─► Post
 - **Snapshot** (`GET /api/v1/state`): bentuk `DataState` web + `scope`, `viewerId`, `listingBusy`,
   `users[].publicStats`, `reviews[].visibleAt`. `SNAPSHOT_SCOPE=scoped` (wajib di produksi) menyaring per viewer
   (ROADMAP §4): tamu = data publik; user = + datanya sendiri dan booking tempat ia jadi pihak; admin = semua.
+  `SNAPSHOT_USERS=referenced` membatasi `users` ke profil yang dirujuk snapshot itu (admin tetap semua).
   Lokasi listing/papan milik orang lain = `geo.FuzzPoint` (≤ 400 m). `src` foto bukti = URL bertanda tangan untuk
   viewer itu (pihak: salinan ber-watermark, admin: asli); foto yang tidak boleh dilihat tidak dikirim.
 - **Realtime**: setiap commit menulis `change_log` (versi) lalu event `{type:"changed",version}` hanya ke pihak
@@ -129,6 +130,8 @@ Contoh lengkap: [`deploy/.env.example`](deploy/.env.example). Kolom "Prod" = waj
 | `PORT` | – | `8080` | |
 | `MIGRATE_ON_START` | – | `true` | |
 | `SNAPSHOT_SCOPE` | – | `scoped` | `full` hanya dengan `DEMO_MODE`, ditolak di produksi |
+| `SNAPSHOT_USERS` | – | `all` | `referenced` = snapshot non-admin hanya memuat profil user yang dirujuk isinya (pemilik listing, pihak booking, ulasan, papan, ...). Biaya snapshot tidak lagi naik dengan jumlah akun. Lihat [`docs/loadtest/2026-11-report.md`](docs/loadtest/2026-11-report.md) |
+| `DATABASE_URL` `?pool_max_conns=N` | – | `max(4, jumlah CPU)` | Ukuran pool pgx (parameter URL bawaan pgx). Saran: 16 di server ini, 8 di VPS 2 vCPU |
 | `PAYMENT_MODE` | – | `offline` | `simulated` (default demo, ditolak di produksi) \| `offline` \| `gateway` (belum ada) |
 | `CORS_ORIGINS` | ya | `https://sewain.me` | Origin web, pisah koma. `*` ditolak di produksi |
 | `ALLOWED_ORIGINS` | – | `https://sewain.me` | Cek CSRF cookie. Default = `CORS_ORIGINS` tanpa `*` |
