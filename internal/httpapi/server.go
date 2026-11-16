@@ -1,43 +1,61 @@
-// Package httpapi exposes the Sewain API: dataset snapshot, actions (the booking state machine & friends),
-// photo evidence upload, PostGIS search, demo controls and a WebSocket change feed.
+// Package httpapi exposes the Sewain API: per-viewer dataset snapshot, actions (each one a database transaction),
+// photo evidence upload, PostGIS search, demo controls and a WebSocket change feed. The HTTP contract is the one the
+// web app (sewain-web) has used since v1.
 package httpapi
 
 import (
+	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/mrfroglab/sewain-api/internal/config"
 	"github.com/mrfroglab/sewain-api/internal/domain"
-	"github.com/mrfroglab/sewain-api/internal/seed"
-	"github.com/mrfroglab/sewain-api/internal/store"
+	"github.com/mrfroglab/sewain-api/internal/service"
 )
 
 type Server struct {
 	cfg    config.Config
-	eng    *domain.Engine
-	db     *store.Store
+	svc    *service.Service
 	hub    *Hub
 	log    *slog.Logger
-	tokens sync.Map // token → userID cache
+	viewer ViewerResolver
+	photos PhotoStore
 }
 
-func New(cfg config.Config, eng *domain.Engine, db *store.Store, log *slog.Logger) *Server {
-	return &Server{cfg: cfg, eng: eng, db: db, hub: NewHub(), log: log}
+// Option customises the server (integration points for the auth and media modules).
+type Option func(*Server)
+
+// WithViewerResolver replaces how requests are authenticated (default: DEMO_MODE bearer tokens).
+func WithViewerResolver(v ViewerResolver) Option { return func(s *Server) { s.viewer = v } }
+
+// WithPhotoStore replaces where photo bytes live (default: LocalPhotoStore{cfg.UploadDir}).
+func WithPhotoStore(p PhotoStore) Option { return func(s *Server) { s.photos = p } }
+
+func New(cfg config.Config, svc *service.Service, log *slog.Logger, opts ...Option) *Server {
+	s := &Server{cfg: cfg, svc: svc, hub: NewHub(), log: log}
+	s.viewer = DemoTokens{Svc: svc}
+	s.photos = LocalPhotoStore{Dir: cfg.UploadDir}
+	for _, o := range opts {
+		o(s)
+	}
+	// Realtime: every committed change is announced. v1 behaviour (broadcast to every client); the notify module
+	// replaces the hub with per-user fan-out based on Change.Users/Admins/Public.
+	svc.OnChange(func(ch service.Change) {
+		msg, _ := json.Marshal(map[string]any{"type": "changed", "version": ch.Version})
+		go s.hub.Broadcast(msg)
+	})
+	return s
 }
+
+// Hub exposes the WebSocket hub (tests, metrics).
+func (s *Server) Hub() *Hub { return s.hub }
 
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
@@ -72,8 +90,9 @@ func (s *Server) cors(next http.Handler) http.Handler {
 			for _, allowed := range s.cfg.CORSOrigins {
 				if allowed == o || allowed == "*" {
 					w.Header().Set("Access-Control-Allow-Origin", o)
-					w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+					w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key, If-None-Match")
 					w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+					w.Header().Set("Access-Control-Expose-Headers", "ETag, Idempotency-Replayed")
 					w.Header().Set("Vary", "Origin")
 				}
 			}
@@ -111,45 +130,15 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 	})
 }
 
-// viewer resolves the bearer token to a user (nil for guests).
-func (s *Server) viewer(r *http.Request) *domain.User {
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if token == "" || token == r.Header.Get("Authorization") {
-		token = r.URL.Query().Get("token")
+// viewerOr500 resolves the viewer; on a resolver error it answers 500 and returns ok=false.
+func (s *Server) viewerOr500(w http.ResponseWriter, r *http.Request) (*service.Viewer, bool) {
+	v, err := s.viewer.Resolve(r)
+	if err != nil {
+		s.log.Error("resolve viewer", "err", err)
+		writeErr(w, 500, "Gagal memeriksa sesi.")
+		return nil, false
 	}
-	if token == "" {
-		return nil
-	}
-	uid, ok := s.tokens.Load(token)
-	if !ok {
-		id, err := s.db.SessionUser(r.Context(), token)
-		if err != nil || id == "" {
-			return nil
-		}
-		s.tokens.Store(token, id)
-		uid = id
-	}
-	s.eng.Lock()
-	defer s.eng.Unlock()
-	if u := s.eng.User(uid.(string)); u != nil {
-		cp := *u
-		return &cp
-	}
-	return nil
-}
-
-// commit persists whatever the last mutation changed and notifies every device. Caller holds the engine lock.
-func (s *Server) commit(ctx context.Context) error {
-	ch := s.eng.TakeChanges()
-	if ch.Empty() {
-		return nil
-	}
-	if err := s.db.Persist(ctx, s.eng.Data(), ch); err != nil {
-		return err
-	}
-	msg, _ := json.Marshal(map[string]any{"type": "changed", "version": s.eng.Data().Version})
-	go s.hub.Broadcast(msg)
-	return nil
+	return v, true
 }
 
 /* ---------------------------------------------------------------- handlers */
@@ -157,7 +146,7 @@ func (s *Server) commit(ctx context.Context) error {
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
-	db := s.db.Ping(ctx) == nil
+	db := s.svc.Pool().Ping(ctx) == nil
 	status := http.StatusOK
 	if !db {
 		status = http.StatusServiceUnavailable
@@ -165,26 +154,44 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, map[string]any{"ok": db, "db": db, "demoMode": s.cfg.DemoMode, "clients": s.hub.Count()})
 }
 
+// state returns the viewer's snapshot (ROADMAP §4) with an ETag; If-None-Match → 304.
 func (s *Server) state(w http.ResponseWriter, r *http.Request) {
-	s.eng.Lock()
-	b, err := s.eng.Snapshot()
-	s.eng.Unlock()
+	viewer, ok := s.viewerOr500(w, r)
+	if !ok {
+		return
+	}
+	etag, _, err := s.svc.ETag(r.Context(), viewer)
+	if err != nil {
+		s.log.Error("etag", "err", err)
+		writeErr(w, 500, "Gagal memuat data.")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Vary", "Authorization, Cookie")
+	if match := r.Header.Get("If-None-Match"); match != "" && match == etag {
+		w.Header().Set("ETag", etag)
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	snap, err := s.svc.Snapshot(r.Context(), viewer)
+	if err != nil {
+		s.log.Error("snapshot", "err", err)
+		writeErr(w, 500, "Gagal memuat data.")
+		return
+	}
+	b, err := service.SnapshotJSON(snap)
 	if err != nil {
 		writeErr(w, 500, "Gagal memuat data.")
 		return
 	}
+	// The ETag describes the version the snapshot was built from (it may be newer than the one checked above),
+	// so a 304 never hides a newer state.
+	w.Header().Set("ETag", s.svc.ETagFor(viewer, snap.Version, snap.ClockOffset))
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(b)
 }
 
-func newToken() string {
-	b := make([]byte, 24)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-// demoLogin issues a session for any user (DEMO_MODE only: OTP is simulated in the prototype, PRD §7.2).
+// demoLogin issues a session for any user (DEMO_MODE only: OTP is simulated in the demo, PRD §7.2).
 func (s *Server) demoLogin(w http.ResponseWriter, r *http.Request) {
 	if !s.cfg.DemoMode {
 		writeErr(w, 403, "Login demo hanya tersedia di DEMO_MODE.")
@@ -197,24 +204,37 @@ func (s *Server) demoLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "Body tidak valid.")
 		return
 	}
-	s.eng.Lock()
-	u := s.eng.User(in.UserID)
-	s.eng.Unlock()
+	u, err := s.svc.GetUserAuth(r.Context(), in.UserID)
+	if err != nil {
+		writeErr(w, 500, "Gagal membuat sesi.")
+		return
+	}
 	if u == nil {
 		writeErr(w, 404, "Akun tidak ditemukan.")
 		return
 	}
-	token := newToken()
-	if err := s.db.SaveSession(r.Context(), token, u.ID); err != nil {
+	token, err := s.svc.CreateDemoSession(r.Context(), u.ID)
+	if err != nil {
 		writeErr(w, 500, "Gagal membuat sesi.")
 		return
 	}
-	s.tokens.Store(token, u.ID)
 	writeJSON(w, 200, map[string]any{"ok": true, "token": token, "userId": u.ID})
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
-	u := s.viewer(r)
+	viewer, ok := s.viewerOr500(w, r)
+	if !ok {
+		return
+	}
+	if viewer == nil {
+		writeErr(w, 401, "Belum masuk.")
+		return
+	}
+	u, err := s.svc.User(r.Context(), viewer.UserID)
+	if err != nil {
+		writeErr(w, 500, "Gagal memuat akun.")
+		return
+	}
 	if u == nil {
 		writeErr(w, 401, "Belum masuk.")
 		return
@@ -222,14 +242,48 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "user": u})
 }
 
+// actionResponse is the v1 response body of POST /api/v1/actions/{name}.
+func actionResponse(name string, res service.Result, err error) (int, json.RawMessage) {
+	var body any
+	status := 200
+	switch {
+	case err == nil:
+		body = map[string]any{"ok": true, "value": res.Value, "version": res.Version}
+	case errors.Is(err, domain.ErrForbidden):
+		status, body = 403, map[string]any{"ok": false, "error": "Sesi tidak cocok dengan akun ini. Masuk ulang, ya."}
+	case errors.Is(err, domain.ErrUnknownAction):
+		status, body = 404, map[string]any{"ok": false, "error": "Aksi tidak dikenal: " + name}
+	default:
+		if msg, ok := service.IsUserError(err); ok {
+			body = map[string]any{"ok": false, "error": msg, "version": res.Version}
+		} else {
+			status, body = 500, map[string]any{"ok": false, "error": "Terjadi kesalahan."}
+		}
+	}
+	b, _ := json.Marshal(body)
+	return status, b
+}
+
+func writeRaw(w http.ResponseWriter, status int, body []byte) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write(append(bytes.TrimRight(body, "\n"), '\n'))
+}
+
 // action runs one web-store action on the server: POST /api/v1/actions/{name} {"args": [...], "id": "<client id>"}.
+// With an Idempotency-Key header the action runs at most once per key and repeats return the stored response.
 func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeErr(w, 400, "Body tidak valid.")
+		return
+	}
 	var in struct {
 		Args []json.RawMessage `json:"args"`
 		ID   string            `json:"id"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
+	if err := json.Unmarshal(raw, &in); err != nil {
 		writeErr(w, 400, "Body tidak valid.")
 		return
 	}
@@ -237,257 +291,108 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true, "ignored": true})
 		return
 	}
-	viewer := s.viewer(r)
+	viewer, ok := s.viewerOr500(w, r)
+	if !ok {
+		return
+	}
 	ctx := r.Context()
 
-	// Demo controls (DEMO_MODE only).
 	switch name {
 	case "advanceClock", "resetClock", "resetDemo":
-		if !s.cfg.DemoMode {
-			writeErr(w, 403, "Hanya tersedia di DEMO_MODE.")
-			return
-		}
-		if viewer == nil {
-			writeErr(w, 401, "Masuk dulu untuk memakai kontrol demo.")
-			return
-		}
-		s.eng.Lock()
-		defer s.eng.Unlock()
-		switch name {
-		case "advanceClock":
-			var ms int64
-			if len(in.Args) > 0 {
-				_ = json.Unmarshal(in.Args[0], &ms)
-			}
-			if ms <= 0 || ms > 30*domain.Day {
-				writeErr(w, 400, "Lompatan waktu tidak valid.")
-				return
-			}
-			s.eng.AdvanceClock(ms)
-		case "resetClock":
-			s.eng.ResetClock()
-		case "resetDemo":
-			if err := s.resetLocked(ctx); err != nil {
-				s.log.Error("reset", "err", err)
-				writeErr(w, 500, "Gagal reset data.")
-				return
-			}
-			writeJSON(w, 200, map[string]any{"ok": true, "version": s.eng.Data().Version})
-			return
-		}
-		if err := s.commit(ctx); err != nil {
-			writeErr(w, 500, "Gagal menyimpan.")
-			return
-		}
-		writeJSON(w, 200, map[string]any{"ok": true, "version": s.eng.Data().Version})
+		s.demoControl(w, r, viewer, name, in.Args)
 		return
 	}
 
-	s.eng.Lock()
-	defer s.eng.Unlock()
-	value, err := s.eng.Dispatch(viewer, name, in.Args, in.ID)
-	var uerr domain.UserError
-	switch {
-	case errors.Is(err, domain.ErrForbidden):
-		_ = s.eng.TakeChanges() // nothing should have changed, but never leak partial state
-		writeErr(w, 403, "Sesi tidak cocok dengan akun ini. Masuk ulang, ya.")
-		return
-	case errors.Is(err, domain.ErrUnknownAction):
-		writeErr(w, 404, "Aksi tidak dikenal: "+name)
-		return
-	case errors.As(err, &uerr):
-		// Rule violations happen before any mutation, but persist defensively anyway.
-		_ = s.commit(ctx)
-		writeJSON(w, 200, map[string]any{"ok": false, "error": uerr.Error(), "version": s.eng.Data().Version})
-		return
-	case err != nil:
-		writeErr(w, 500, "Terjadi kesalahan.")
-		return
-	}
-	if err := s.commit(ctx); err != nil {
-		s.log.Error("persist", "action", name, "err", err)
-		writeErr(w, 500, "Gagal menyimpan ke database.")
+	if key := strings.TrimSpace(r.Header.Get("Idempotency-Key")); key != "" && viewer != nil {
+		if len(key) > 200 {
+			writeErr(w, 400, "Idempotency-Key terlalu panjang.")
+			return
+		}
+		out, replayed, err := s.svc.DispatchIdempotent(ctx, viewer, key, service.RequestHash(name, raw), name, in.Args, in.ID,
+			func(res service.Result, err error) (int, json.RawMessage) { return actionResponse(name, res, err) })
+		if errors.Is(err, service.ErrIdempotencyMismatch) {
+			writeErr(w, 422, "Idempotency-Key ini sudah dipakai untuk permintaan lain.")
+			return
+		}
+		if err != nil {
+			s.log.Error("action", "action", name, "err", err)
+			writeErr(w, 500, "Gagal menyimpan ke database.")
+			return
+		}
+		if replayed {
+			w.Header().Set("Idempotency-Replayed", "true")
+		}
+		writeRaw(w, out.Status, out.Body)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "value": value, "version": s.eng.Data().Version})
-}
 
-// resetLocked rebuilds the demo dataset at "now" (caller holds the engine lock).
-func (s *Server) resetLocked(ctx context.Context) error {
-	d, err := seed.Build(time.Now().UnixMilli())
+	res, err := s.svc.Dispatch(ctx, viewer, name, in.Args, in.ID)
 	if err != nil {
-		return err
+		if _, isRule := service.IsUserError(err); isRule {
+			res.Version, _ = s.svc.Version(ctx)
+		} else if !errors.Is(err, domain.ErrForbidden) && !errors.Is(err, domain.ErrUnknownAction) {
+			s.log.Error("action", "action", name, "err", err)
+			writeErr(w, 500, "Gagal menyimpan ke database.")
+			return
+		}
 	}
-	d.Version = s.eng.Data().Version + 1
-	s.eng.Replace(d)
-	if err := s.db.ReplaceAll(ctx, d); err != nil {
-		return err
-	}
-	msg, _ := json.Marshal(map[string]any{"type": "changed", "version": d.Version, "reset": true})
-	go s.hub.Broadcast(msg)
-	return nil
+	status, body := actionResponse(name, res, err)
+	writeRaw(w, status, body)
 }
 
-// Seed resets the dataset on first boot.
-func (s *Server) Seed(ctx context.Context) error {
-	s.eng.Lock()
-	defer s.eng.Unlock()
-	return s.resetLocked(ctx)
-}
-
-var photoStages = map[string]bool{"referensi": true, "checkout": true, "checkin": true, "jaminan": true, "masalah": true, "chat": true, "sengketa": true}
-
-// uploadPhoto stores evidence: SHA-256 is computed over the bytes the server received and the timestamp comes
-// from the server clock (FR-P2/P3, FR-P7). KTP/selfie are never uploaded in the prototype (PRD §7.2).
-func (s *Server) uploadPhoto(w http.ResponseWriter, r *http.Request) {
-	viewer := s.viewer(r)
+// demoControl: advanceClock / resetClock / resetDemo (DEMO_MODE only, any signed-in user, like v1).
+func (s *Server) demoControl(w http.ResponseWriter, r *http.Request, viewer *service.Viewer, name string, args []json.RawMessage) {
+	if !s.cfg.DemoMode {
+		writeErr(w, 403, "Hanya tersedia di DEMO_MODE.")
+		return
+	}
 	if viewer == nil {
-		writeErr(w, 401, "Masuk dulu untuk mengunggah foto.")
+		writeErr(w, 401, "Masuk dulu untuk memakai kontrol demo.")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 10<<20)
-	if err := r.ParseMultipartForm(10 << 20); err != nil {
-		writeErr(w, 400, "Foto terlalu besar atau tidak valid (maks 10 MB).")
-		return
+	ctx := r.Context()
+	var ch service.Change
+	var err error
+	switch name {
+	case "advanceClock":
+		var ms int64
+		if len(args) > 0 {
+			_ = json.Unmarshal(args[0], &ms)
+		}
+		if ms <= 0 || ms > service.MaxClockJump {
+			writeErr(w, 400, "Lompatan waktu tidak valid.")
+			return
+		}
+		ch, err = s.svc.AdvanceClock(ctx, ms)
+	case "resetClock":
+		ch, err = s.svc.ResetClock(ctx)
+	case "resetDemo":
+		ch, err = s.svc.ResetDemo(ctx)
+		if err != nil {
+			s.log.Error("reset", "err", err)
+			writeErr(w, 500, "Gagal reset data.")
+			return
+		}
 	}
-	stage := r.FormValue("stage")
-	if !photoStages[stage] {
-		writeErr(w, 400, "Tahap foto tidak valid.")
-		return
-	}
-	f, hdr, err := r.FormFile("file")
 	if err != nil {
-		writeErr(w, 400, "File foto wajib.")
+		writeErr(w, 500, "Gagal menyimpan.")
 		return
 	}
-	defer f.Close()
-	data, err := io.ReadAll(f)
-	if err != nil {
-		writeErr(w, 400, "Gagal membaca foto.")
-		return
-	}
-	ctype := http.DetectContentType(data)
-	ext := map[string]string{"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif"}[ctype]
-	if ext == "" {
-		writeErr(w, 415, "Format foto tidak didukung ("+ctype+").")
-		return
-	}
-	sum := sha256.Sum256(data)
-	id := domain.NewID("p")
-	if err := os.MkdirAll(s.cfg.UploadDir, 0o755); err != nil {
-		writeErr(w, 500, "Penyimpanan foto tidak tersedia.")
-		return
-	}
-	if err := os.WriteFile(filepath.Join(s.cfg.UploadDir, id+ext), data, 0o644); err != nil {
-		writeErr(w, 500, "Gagal menyimpan foto.")
-		return
-	}
-	source := r.FormValue("source")
-	if source != "kamera" && source != "galeri" {
-		source = "galeri"
-	}
-	rec := &domain.PhotoRecord{ID: id, Stage: stage, UploaderID: viewer.ID, Src: "/api/v1/photos/" + id, Sha256: hex.EncodeToString(sum[:]), Source: source, Bytes: ptrInt64(int64(len(data)))}
-	if v := r.FormValue("bookingId"); v != "" {
-		rec.BookingID = &v
-	}
-	if v := r.FormValue("angle"); v != "" {
-		rec.Angle = &v
-	}
-	if v, err := strconv.Atoi(r.FormValue("width")); err == nil && v > 0 {
-		rec.Width = &v
-	}
-	if v, err := strconv.Atoi(r.FormValue("height")); err == nil && v > 0 {
-		rec.Height = &v
-	}
-	_ = hdr
-	s.eng.Lock()
-	defer s.eng.Unlock()
-	rec.ServerTimestamp = s.eng.Now()
-	s.eng.AddPhoto(rec)
-	if err := s.commit(r.Context()); err != nil {
-		writeErr(w, 500, "Gagal menyimpan data foto.")
-		return
-	}
-	writeJSON(w, 200, map[string]any{"ok": true, "photo": rec})
-}
-
-func ptrInt64(v int64) *int64 { return &v }
-
-// demoPhoto registers a bundled sample image ("Pakai foto contoh") as evidence, hashed by the server.
-func (s *Server) demoPhoto(w http.ResponseWriter, r *http.Request) {
-	viewer := s.viewer(r)
-	if viewer == nil {
-		writeErr(w, 401, "Masuk dulu.")
-		return
-	}
-	var in struct {
-		URL       string  `json:"url"`
-		Stage     string  `json:"stage"`
-		BookingID *string `json:"bookingId"`
-		Angle     *string `json:"angle"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 8192)).Decode(&in); err != nil || !strings.HasPrefix(in.URL, "/img/") || strings.Contains(in.URL, "..") {
-		writeErr(w, 400, "URL foto contoh tidak valid.")
-		return
-	}
-	if !photoStages[in.Stage] {
-		writeErr(w, 400, "Tahap foto tidak valid.")
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
-	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.WebOrigin+in.URL, nil)
-	res, err := http.DefaultClient.Do(req)
-	if err != nil || res.StatusCode != 200 {
-		writeErr(w, 502, "Foto contoh tidak bisa diambil.")
-		return
-	}
-	defer res.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(res.Body, 10<<20))
-	sum := sha256.Sum256(data)
-	rec := &domain.PhotoRecord{ID: domain.NewID("p"), BookingID: in.BookingID, Stage: in.Stage, UploaderID: viewer.ID, Src: in.URL, Sha256: hex.EncodeToString(sum[:]), Source: "demo", Angle: in.Angle, Bytes: ptrInt64(int64(len(data)))}
-	s.eng.Lock()
-	defer s.eng.Unlock()
-	rec.ServerTimestamp = s.eng.Now()
-	s.eng.AddPhoto(rec)
-	if err := s.commit(r.Context()); err != nil {
-		writeErr(w, 500, "Gagal menyimpan data foto.")
-		return
-	}
-	writeJSON(w, 200, map[string]any{"ok": true, "photo": rec})
-}
-
-func (s *Server) servePhoto(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	s.eng.Lock()
-	p := s.eng.Photo(id)
-	s.eng.Unlock()
-	if p == nil || !strings.HasPrefix(p.Src, "/api/v1/photos/") {
-		http.NotFound(w, r)
-		return
-	}
-	matches, _ := filepath.Glob(filepath.Join(s.cfg.UploadDir, filepath.Base(id)+".*"))
-	if len(matches) == 0 {
-		http.NotFound(w, r)
-		return
-	}
-	// Evidence never changes (append-only), so it can be cached forever.
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	w.Header().Set("X-Content-SHA256", p.Sha256)
-	http.ServeFile(w, r, matches[0])
+	writeJSON(w, 200, map[string]any{"ok": true, "version": ch.Version})
 }
 
 func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := func(k string) float64 { v, _ := strconv.ParseFloat(q.Get(k), 64); return v }
 	i := func(k string) int64 { v, _ := strconv.ParseInt(q.Get(k), 10, 64); return v }
-	p := store.SearchParams{Lat: f("lat"), Lng: f("lng"), RadiusKm: f("radiusKm"), Category: q.Get("kategori"), MinPrice: i("min"), MaxPrice: i("max"),
-		Handover: q.Get("serah"), Collateral: q.Get("jaminan"), ProviderType: q.Get("penyedia"), Q: q.Get("q")}
+	p := service.SearchParams{Lat: f("lat"), Lng: f("lng"), RadiusKm: f("radiusKm"), Category: q.Get("kategori"), MinPrice: i("min"), MaxPrice: i("max"),
+		Handover: q.Get("serah"), Collateral: q.Get("jaminan"), ProviderType: q.Get("penyedia"), Q: q.Get("q"),
+		StartDate: q.Get("mulai"), EndDate: q.Get("selesai")}
 	if p.Lat == 0 || p.Lng == 0 || p.RadiusKm <= 0 || p.RadiusKm > 50 {
 		writeErr(w, 400, "lat, lng dan radiusKm (≤ 50) wajib.")
 		return
 	}
-	res, err := s.db.Search(r.Context(), p)
+	res, err := s.svc.Search(r.Context(), p)
 	if err != nil {
 		s.log.Error("search", "err", err)
 		writeErr(w, 500, "Pencarian gagal.")
@@ -497,31 +402,11 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
-	s.eng.Lock()
-	v := s.eng.Data().Version
-	s.eng.Unlock()
-	hello, _ := json.Marshal(map[string]any{"type": "hello", "version": v})
-	origins := []string{"*"}
-	s.hub.Serve(w, r, origins, hello)
-}
-
-// RunTicker runs the time-based jobs (expiry, overdue, auto-complete, L1→L2) every interval.
-func (s *Server) RunTicker(ctx context.Context, every time.Duration) {
-	t := time.NewTicker(every)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			s.eng.Lock()
-			s.eng.Tick()
-			if err := s.commit(ctx); err != nil {
-				s.log.Error("tick persist", "err", err)
-			}
-			s.eng.Unlock()
-		}
+	v, err := s.svc.Version(r.Context())
+	if err != nil {
+		writeErr(w, 500, "Gagal memuat versi.")
+		return
 	}
+	hello, _ := json.Marshal(map[string]any{"type": "hello", "version": v})
+	s.hub.Serve(w, r, []string{"*"}, hello)
 }
-
-var _ = fmt.Sprintf

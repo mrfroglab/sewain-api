@@ -1,0 +1,64 @@
+# sqlc generates typed query code from internal/db/queries against the goose migrations.
+# Run with `make generate` (Docker image pinned there). Generated code is committed.
+version: "2"
+sql:
+  - engine: postgresql
+    schema: internal/db/migrations
+    queries: internal/db/queries
+    gen:
+      go:
+        package: dbq
+        out: internal/db/dbq
+        sql_package: pgx/v5
+        emit_pointers_for_null_types: true
+        emit_empty_slices: true
+        overrides:
+          - db_type: timestamptz
+            go_type: time.Time
+          - db_type: timestamptz
+            nullable: true
+            go_type: { type: time.Time, pointer: true }
+          - db_type: pg_catalog.timestamptz
+            go_type: time.Time
+          - db_type: pg_catalog.timestamptz
+            nullable: true
+            go_type: { type: time.Time, pointer: true }
+          - db_type: date
+            go_type: time.Time
+          - db_type: date
+            nullable: true
+            go_type: { type: time.Time, pointer: true }
+          - db_type: pg_catalog.int4
+            go_type: int
+          - db_type: pg_catalog.int4
+            nullable: true
+            go_type: { type: int, pointer: true }
+          - db_type: jsonb
+            go_type: encoding/json.RawMessage
+          - db_type: jsonb
+            nullable: true
+            go_type: encoding/json.RawMessage
+          - column: users.demo
+            go_type: { import: github.com/mrfroglab/sewain-api/internal/domain, type: DemoInfo, pointer: true }
+          - column: listings.duration_discount
+            go_type: { import: github.com/mrfroglab/sewain-api/internal/domain, type: DurationDiscount, pointer: true }
+          - column: listings.vehicle
+            go_type: { import: github.com/mrfroglab/sewain-api/internal/domain, type: VehicleInfo, pointer: true }
+          - column: listing_rows.duration_discount
+            go_type: { import: github.com/mrfroglab/sewain-api/internal/domain, type: DurationDiscount, pointer: true }
+          - column: listing_rows.vehicle
+            go_type: { import: github.com/mrfroglab/sewain-api/internal/domain, type: VehicleInfo, pointer: true }
+          - column: bookings.collateral
+            go_type: { import: github.com/mrfroglab/sewain-api/internal/domain, type: CollateralOption }
+          - column: bookings.agreement
+            go_type: { import: github.com/mrfroglab/sewain-api/internal/domain, type: Agreement }
+          - column: bookings.payment
+            go_type: { import: github.com/mrfroglab/sewain-api/internal/domain, type: PaymentInfo }
+          - column: bookings.checkout
+            go_type: { import: github.com/mrfroglab/sewain-api/internal/domain, type: Checkout, pointer: true }
+          - column: bookings.checkin
+            go_type: { import: github.com/mrfroglab/sewain-api/internal/domain, type: Checkin, pointer: true }
+          - column: bookings.collateral_return
+            go_type: { import: github.com/mrfroglab/sewain-api/internal/domain, type: CollateralReturn, pointer: true }
+          - column: disputes.recommendation
+            go_type: { import: github.com/mrfroglab/sewain-api/internal/domain, type: Recommendation, pointer: true }

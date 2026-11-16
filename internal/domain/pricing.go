@@ -22,7 +22,7 @@ func QuoteRent(l *Listing, start, end string) RentQuote {
 	}
 	if d := l.DurationDiscount; d != nil && days >= d.MinDays {
 		total = int64(math.Round(float64(total) * (1 - d.Percent/100)))
-		breakdown += fmt.Sprintf(" − diskon %s%%", fmtPercent(d.Percent))
+		breakdown += fmt.Sprintf(" − diskon %s%%", FmtPercent(d.Percent))
 	}
 	return RentQuote{Days: days, Base: base, Discount: base - total, Total: total, Breakdown: breakdown}
 }
@@ -65,12 +65,12 @@ func ComputeCommission(rent int64, c CommissionConfig) CommissionSnapshot {
 func CollateralValue(o CollateralOption, itemValue int64) int64 {
 	switch o.Kind {
 	case "deposit":
-		if deref(o.DepositMode, "") == "persen" {
-			return round1000(float64(itemValue) * deref(o.DepositPercent, 0) / 100)
+		if Deref(o.DepositMode, "") == "persen" {
+			return Round1000(float64(itemValue) * Deref(o.DepositPercent, 0) / 100)
 		}
-		return deref(o.DepositAmount, 0)
+		return Deref(o.DepositAmount, 0)
 	case "barang", "custom":
-		return deref(o.EstimatedValue, 0)
+		return Deref(o.EstimatedValue, 0)
 	}
 	return 0
 }
@@ -92,17 +92,17 @@ func DescribeCollateral(o CollateralOption) string {
 	case "identitas":
 		return "Titip " + cards
 	case "deposit":
-		amount := Rupiah(deref(o.DepositAmount, 0))
-		if deref(o.DepositMode, "") == "persen" {
-			amount = fmtPercent(deref(o.DepositPercent, 0)) + "% nilai barang"
+		amount := Rupiah(Deref(o.DepositAmount, 0))
+		if Deref(o.DepositMode, "") == "persen" {
+			amount = FmtPercent(Deref(o.DepositPercent, 0)) + "% nilai barang"
 		}
-		if deref(o.WithIdentity, false) {
+		if Deref(o.WithIdentity, false) {
 			return "Titip " + cards + " + deposit " + amount
 		}
 		return "Deposit " + amount
 	case "barang":
-		return "Titip barang: " + deref(o.Description, "barang lain")
+		return "Titip barang: " + Deref(o.Description, "barang lain")
 	default:
-		return "Jaminan khusus: " + deref(o.Description, "-")
+		return "Jaminan khusus: " + Deref(o.Description, "-")
 	}
 }

@@ -27,9 +27,11 @@ const (
 	Day  = int64(86_400_000)
 )
 
-func ptr[T any](v T) *T { return &v }
+// Ptr returns a pointer to v.
+func Ptr[T any](v T) *T { return &v }
 
-func deref[T any](p *T, def T) T {
+// Deref returns *p, or def when p is nil.
+func Deref[T any](p *T, def T) T {
 	if p == nil {
 		return def
 	}
@@ -129,16 +131,19 @@ func MaskNik(nik string) string {
 	return nik[:4] + strings.Repeat("*", len(nik)-8) + nik[len(nik)-4:]
 }
 
-func round1000(v float64) int64 { return int64(math.Round(v/1000) * 1000) }
+// Round1000 rounds to the nearest thousand rupiah.
+func Round1000(v float64) int64 { return int64(math.Round(v/1000) * 1000) }
 
-func fmtPercent(v float64) string {
+// FmtPercent formats 12.5 as "12,5" and 10 as "10".
+func FmtPercent(v float64) string {
 	if v == math.Trunc(v) {
 		return fmt.Sprintf("%d", int64(v))
 	}
 	return strings.Replace(fmt.Sprintf("%.1f", v), ".", ",", 1)
 }
 
-func truncate(s string, n int) string {
+// Truncate cuts s to n runes.
+func Truncate(s string, n int) string {
 	r := []rune(s)
 	if len(r) <= n {
 		return s
