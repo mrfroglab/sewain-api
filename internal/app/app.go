@@ -86,7 +86,7 @@ func New(cfg config.Config, pool *pgxpool.Pool, log *slog.Logger, opt Options) (
 			return nil, fmt.Errorf("metrics: %w", err)
 		}
 	}
-	a.Svc = service.New(pool, service.Options{DemoMode: cfg.DemoMode, SnapshotScope: cfg.SnapshotScope, PaymentMode: cfg.PaymentMode,
+	a.Svc = service.New(pool, service.Options{DemoMode: cfg.DemoMode, SnapshotScope: cfg.SnapshotScope, SnapshotUsers: cfg.SnapshotUsers, PaymentMode: cfg.PaymentMode,
 		Now: now, Log: log})
 
 	// Media: storage (write-once), signer (MEDIA_SIGNING_KEY, random in development/demo when unset).

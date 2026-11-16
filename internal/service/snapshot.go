@@ -127,25 +127,6 @@ func (s *Service) buildSnapshot(ctx context.Context, tx pgx.Tx, viewer *Viewer, 
 	r.ok(err)
 	d.BannedKeywords = words
 
-	// Users: everyone's public profile, the viewer's own profile in full.
-	stores, err := q.ListStores(ctx)
-	r.ok(err)
-	storeOf := map[string]*dbq.Store{}
-	for i := range stores {
-		storeOf[stores[i].UserID] = &stores[i]
-	}
-	users, err := q.ListUsers(ctx)
-	r.ok(err)
-	stats := r.publicStats(now)
-	for _, u := range users {
-		du := userFromRow(u, storeOf[u.ID])
-		if !all && u.ID != me {
-			du = publicProfile(du)
-		}
-		du.PublicStats = stats[u.ID]
-		d.Users = append(d.Users, du)
-	}
-
 	// Listings: photos and collateral options are loaded once and grouped.
 	photosOf := map[string][]string{}
 	lp, err := q.ListListingPhotos(ctx)
@@ -223,6 +204,14 @@ func (s *Service) buildSnapshot(ctx context.Context, tx pgx.Tx, viewer *Viewer, 
 	} else if me != "" {
 		s.loadPrivateOf(r, d, me)
 	}
+
+	// Users last: with SNAPSHOT_USERS=referenced a scoped snapshot only carries the profiles the rest of it points
+	// at, which keeps its size and cost independent of the number of accounts.
+	var ids []string
+	if !all && s.opt.SnapshotUsers == SnapshotUsersReferenced {
+		ids = referencedUsers(d, me)
+	}
+	s.loadUsers(r, d, all, me, now, ids)
 	if r.err != nil {
 		return nil, r.err
 	}
@@ -231,6 +220,94 @@ func (s *Service) buildSnapshot(ctx context.Context, tx pgx.Tx, viewer *Viewer, 
 }
 
 // publicProfile keeps what anyone may see (ROADMAP §4): no phone, e-mail, NIK, strikes or verification details.
+// Snapshot user scopes (Options.SnapshotUsers).
+const (
+	SnapshotUsersAll        = "all"
+	SnapshotUsersReferenced = "referenced"
+)
+
+// loadUsers adds public profiles (the viewer's own profile in full, everything for admins/full scope) with their
+// public reputation. ids == nil loads every user; otherwise only those ids.
+func (s *Service) loadUsers(r *snapReader, d *domain.Data, all bool, me string, now int64, ids []string) {
+	q, ctx := r.q, r.ctx
+	stores, err := q.ListStores(ctx)
+	r.ok(err)
+	storeOf := map[string]*dbq.Store{}
+	for i := range stores {
+		storeOf[stores[i].UserID] = &stores[i]
+	}
+	var users []dbq.User
+	if ids == nil {
+		users, err = q.ListUsers(ctx)
+	} else {
+		users, err = q.ListUsersByIDs(ctx, ids)
+	}
+	r.ok(err)
+	stats := r.publicStats(now, ids)
+	for _, u := range users {
+		du := userFromRow(u, storeOf[u.ID])
+		if !all && u.ID != me {
+			du = publicProfile(du)
+		}
+		du.PublicStats = stats[u.ID]
+		d.Users = append(d.Users, du)
+	}
+}
+
+// referencedUsers lists the users a scoped snapshot refers to: the viewer, the moderation account, listing owners,
+// review authors and targets, the wanted board, and everyone on the viewer's bookings, messages, disputes,
+// reports, strikes and verifications. Sorted, without duplicates.
+func referencedUsers(d *domain.Data, me string) []string {
+	set := map[string]bool{domain.AdminID: true}
+	add := func(ids ...domain.ID) {
+		for _, id := range ids {
+			if id != "" {
+				set[id] = true
+			}
+		}
+	}
+	add(me)
+	for _, l := range d.Listings {
+		add(l.OwnerID)
+	}
+	for _, x := range d.Reviews {
+		add(x.FromID, x.ToID)
+	}
+	for _, w := range d.Wanted {
+		add(w.RequesterID)
+		for _, o := range w.Offers {
+			add(o.ProviderID)
+		}
+	}
+	for _, b := range d.Bookings {
+		add(b.RenterID, b.ProviderID)
+	}
+	for _, m := range d.Messages {
+		add(m.SenderID)
+	}
+	for _, x := range d.Disputes {
+		add(x.OpenedBy)
+	}
+	for _, x := range d.Reports {
+		add(x.ReporterID)
+		if x.TargetType == "user" {
+			add(x.TargetID)
+		}
+	}
+	for _, x := range d.Strikes {
+		add(x.UserID, x.ByAdminID)
+	}
+	for _, v := range d.Verifications {
+		add(v.UserID)
+	}
+	out := make([]string, 0, len(set))
+	for id := range set {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func publicProfile(u *domain.User) *domain.User {
 	p := &domain.User{
 		ID: u.ID, Name: domain.FirstName(u.Name), Nickname: u.Nickname, Role: u.Role, AccountType: u.AccountType,
@@ -365,7 +442,8 @@ func (s *Service) loadPrivateOf(r *snapReader, d *domain.Data, me string) {
 
 // publicStats computes the public reputation of every user (web trustScore, moved to the server): completed
 // rentals (+ seed base count), disputes on their bookings, strikes, and the trust score over visible reviews.
-func (r *snapReader) publicStats(now int64) map[string]*domain.PublicStats {
+// ids == nil computes every user; otherwise only those ids.
+func (r *snapReader) publicStats(now int64, ids []string) map[string]*domain.PublicStats {
 	out := map[string]*domain.PublicStats{}
 	rows, err := r.tx.Query(r.ctx, `
 		SELECT u.id, u.verification_status = 'terverifikasi', coalesce(u.base_rating, 0), coalesce(u.base_rating_count, 0), u.strikes,
@@ -378,7 +456,8 @@ func (r *snapReader) publicStats(now int64) map[string]*domain.PublicStats {
 		             SELECT b.renter_id AS uid FROM disputes x JOIN bookings b ON b.id = x.booking_id
 		             UNION ALL SELECT b.provider_id FROM disputes x JOIN bookings b ON b.id = x.booking_id) y GROUP BY uid) d ON d.uid = u.id
 		LEFT JOIN (SELECT to_id, array_agg(rating ORDER BY ord) AS ratings FROM reviews
-		           WHERE released OR visible_at <= $1 GROUP BY to_id) rv ON rv.to_id = u.id`, tsOf(now))
+		           WHERE released OR visible_at <= $1 GROUP BY to_id) rv ON rv.to_id = u.id
+		WHERE $2::text[] IS NULL OR u.id = ANY($2)`, tsOf(now), ids)
 	if !r.ok(err) {
 		return out
 	}

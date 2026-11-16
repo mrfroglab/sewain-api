@@ -36,6 +36,8 @@ const (
 type Options struct {
 	DemoMode      bool
 	SnapshotScope string
+	// SnapshotUsers: SnapshotUsersAll (default) or SnapshotUsersReferenced (config.Config.SnapshotUsers).
+	SnapshotUsers string
 	// PaymentMode: simulated | offline | gateway. Empty = simulated with DEMO_MODE, offline otherwise.
 	PaymentMode string
 	// Now is the real clock (the demo clock adds the stored offset). Tests inject a fake one.
