@@ -56,6 +56,18 @@ func (s *Service) DispatchIdempotent(ctx context.Context, viewer *Viewer, key, r
 	if out, ok, err := get(s.q); err == nil || !db.IsNotFound(err) {
 		return out, ok, err
 	}
+	// A KYC-backed review is decided by the KYC module in its own transaction. kyc.Decide refuses a second
+	// decision, so a retry gets a rule violation instead of a double decision; the key is not stored.
+	if res, handled, err := s.reviewViaKYC(ctx, viewer, name, args); handled {
+		if err != nil && !errors.Is(err, domain.ErrForbidden) {
+			if _, isRule := IsUserError(err); !isRule {
+				return StoredResponse{}, false, err
+			}
+			res.Version, _ = s.Version(ctx)
+		}
+		status, body := respond(res, err)
+		return StoredResponse{Status: status, Body: body}, false, nil
+	}
 
 	var out StoredResponse
 	var replayed bool

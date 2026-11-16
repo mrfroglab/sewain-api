@@ -20,6 +20,9 @@ type Result struct {
 // when the acting user (first argument) is not the viewer, domain.ErrUnknownAction for unknown names, and a
 // domain.UserError for rule violations (nothing is written then).
 func (s *Service) Dispatch(ctx context.Context, viewer *Viewer, name string, args []json.RawMessage, wantID string) (Result, error) {
+	if res, handled, err := s.reviewViaKYC(ctx, viewer, name, args); handled {
+		return res, err
+	}
 	var value any
 	ch, err := s.run(ctx, func(t *txn) error {
 		v, err := t.dispatch(viewer, name, args, wantID)
@@ -122,6 +125,8 @@ func (t *txn) dispatch(viewer *Viewer, name string, args []json.RawMessage, want
 		return none, t.cancelBooking(a, str(1), str(2))
 	case "payBooking":
 		return none, t.payBooking(a, str(1), str(2))
+	case "confirmDirectPayment":
+		return none, t.confirmDirectPayment(a, str(1))
 	case "submitCheckout":
 		var in domain.CheckoutInput
 		if err := arg(2, &in); err != nil {
@@ -248,7 +253,7 @@ func (t *txn) dispatch(viewer *Viewer, name string, args []json.RawMessage, want
 var actionNames = map[string]struct{}{
 	"updateUser": {}, "submitVerification": {}, "reviewVerification": {}, "createListing": {}, "updateListing": {},
 	"setListingStatus": {}, "toggleFavorite": {}, "createBooking": {}, "acceptBooking": {}, "declineBooking": {},
-	"cancelBooking": {}, "payBooking": {}, "submitCheckout": {}, "addCheckoutPhotos": {}, "agreeCheckout": {},
+	"cancelBooking": {}, "payBooking": {}, "confirmDirectPayment": {}, "submitCheckout": {}, "addCheckoutPhotos": {}, "agreeCheckout": {},
 	"rejectAtCheckout": {}, "submitCheckin": {}, "returnCollateral": {}, "confirmCollateral": {}, "submitReview": {},
 	"sendMessage": {}, "markThreadRead": {}, "markNotificationsRead": {}, "openDispute": {}, "proposeSolution": {},
 	"respondProposal": {}, "escalateDispute": {}, "adminRecommend": {}, "resolveDispute": {}, "createReport": {},

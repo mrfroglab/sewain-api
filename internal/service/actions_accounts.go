@@ -9,6 +9,10 @@ import (
 )
 
 func (t *txn) registerUser(in domain.RegisterInput, wantID string) (domain.ID, error) {
+	if !t.s.opt.DemoMode {
+		// Outside the demo accounts are created by OTP verification (POST /api/v1/auth/otp/verify).
+		return "", domain.Fail("Daftar pakai nomor HP dan kode OTP, ya.")
+	}
 	phone := domain.Digits(in.Phone)
 	if len(phone) < 9 {
 		return "", domain.Fail("Nomor HP tidak valid.")
@@ -112,6 +116,10 @@ func (t *txn) updateUser(userID domain.ID, p domain.UserPatch) error {
 // submitVerification: prototype eKYC is simulated and approves instantly (PRD §7.2), but the rules are real:
 // one NIK = one account (FR-A3) and blacklisted NIKs cannot come back.
 func (t *txn) submitVerification(userID domain.ID, in domain.VerificationInput, wantID string) (domain.ID, error) {
+	if !t.s.opt.DemoMode {
+		// Production: KTP + selfie are uploaded encrypted (POST /api/v1/kyc/submissions) and reviewed by an admin.
+		return "", domain.Fail("Unggah foto KTP dan selfie di halaman verifikasi, ya.")
+	}
 	u := t.userForUpdate(userID)
 	if u == nil {
 		return "", domain.Fail("Akun tidak ditemukan.")

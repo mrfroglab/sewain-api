@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/mrfroglab/sewain-api/internal/domain"
+	"github.com/mrfroglab/sewain-api/internal/geo"
 	"github.com/mrfroglab/sewain-api/internal/service"
 )
 
@@ -40,7 +40,7 @@ func TestSearch(t *testing.T) {
 		if l.Status != "aktif" {
 			continue
 		}
-		d := domain.DistanceMeters(plat, plng, l.Location.Lat, l.Location.Lng)
+		d := geo.DistanceKm(plat, plng, l.Location.Lat, l.Location.Lng) * 1000
 		reach := math.Min(3000, l.RadiusKm*1000)
 		switch {
 		case math.Abs(d-reach) < 30 || math.Abs(d-3000) < 30:

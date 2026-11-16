@@ -6,11 +6,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/mrfroglab/sewain-api/internal/db/dbq"
 	"github.com/mrfroglab/sewain-api/internal/domain"
+	"github.com/mrfroglab/sewain-api/internal/geo"
 )
 
 // Snapshot is GET /api/v1/state: the web app's DataState plus the server clock.
@@ -58,10 +61,14 @@ func (s *Service) ETagFor(viewer *Viewer, version, clockOffset int64) string {
 //     notifications/favorites/chat reads/reports/strikes/verifications, own reviews;
 //   - admin and scope "full": everything (v1 behavior).
 func (s *Service) Snapshot(ctx context.Context, viewer *Viewer) (*Snapshot, error) {
+	return s.snapshot(ctx, viewer, s.SnapshotScope())
+}
+
+func (s *Service) snapshot(ctx context.Context, viewer *Viewer, scope string) (*Snapshot, error) {
 	var out *Snapshot
 	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
 		var err error
-		out, err = s.buildSnapshot(ctx, dbq.New(tx), viewer)
+		out, err = s.buildSnapshot(ctx, tx, viewer, scope)
 		return err
 	})
 	return out, err
@@ -69,6 +76,7 @@ func (s *Service) Snapshot(ctx context.Context, viewer *Viewer) (*Snapshot, erro
 
 type snapReader struct {
 	ctx context.Context
+	tx  pgx.Tx
 	q   *dbq.Queries
 	err error
 }
@@ -80,14 +88,16 @@ func (r *snapReader) ok(err error) bool {
 	return r.err == nil
 }
 
-func (s *Service) buildSnapshot(ctx context.Context, q *dbq.Queries, viewer *Viewer) (*Snapshot, error) {
-	r := &snapReader{ctx: ctx, q: q}
-	all := s.SnapshotScope() == ScopeFull || viewer.IsAdmin()
+func (s *Service) buildSnapshot(ctx context.Context, tx pgx.Tx, viewer *Viewer, scope string) (*Snapshot, error) {
+	q := dbq.New(tx)
+	r := &snapReader{ctx: ctx, tx: tx, q: q}
+	all := scope == ScopeFull || viewer.IsAdmin()
 	me := ""
+	d := &domain.Data{Favorites: map[domain.ID][]domain.ID{}, ChatReads: map[string]int64{}, Scope: scope}
 	if viewer != nil {
 		me = viewer.UserID
+		d.ViewerID = domain.Ptr(me)
 	}
-	d := &domain.Data{Favorites: map[domain.ID][]domain.ID{}, ChatReads: map[string]int64{}}
 
 	version, err := q.CurrentVersion(ctx)
 	r.ok(err)
@@ -97,6 +107,7 @@ func (s *Service) buildSnapshot(ctx context.Context, q *dbq.Queries, viewer *Vie
 	seedInfo, err := getSetting[seedSetting](ctx, q, "seed")
 	r.ok(err)
 	d.ClockOffset, d.Seeded, d.SeedBase = clock.OffsetMs, seedInfo.Seeded, seedInfo.SeedBase
+	now := s.realNow() + clock.OffsetMs // demo clock
 	counter, err := q.BookingCounter(ctx)
 	r.ok(err)
 	d.BookingCounter = int(counter)
@@ -125,11 +136,13 @@ func (s *Service) buildSnapshot(ctx context.Context, q *dbq.Queries, viewer *Vie
 	}
 	users, err := q.ListUsers(ctx)
 	r.ok(err)
+	stats := r.publicStats(now)
 	for _, u := range users {
 		du := userFromRow(u, storeOf[u.ID])
 		if !all && u.ID != me {
 			du = publicProfile(du)
 		}
+		du.PublicStats = stats[u.ID]
 		d.Users = append(d.Users, du)
 	}
 
@@ -156,10 +169,11 @@ func (s *Service) buildSnapshot(ctx context.Context, q *dbq.Queries, viewer *Vie
 	for _, l := range listings {
 		dl := listingFromRow(l, photosOf[l.ID], optionsOf[l.ID])
 		if !all && l.OwnerID != me {
-			dl.Location.Lat, dl.Location.Lng = domain.PublicLocation(dl.Location.Lat, dl.Location.Lng)
+			dl.Location.Lat, dl.Location.Lng = geo.FuzzPoint(l.ID, dl.Location.Lat, dl.Location.Lng)
 		}
 		d.Listings = append(d.Listings, dl)
 	}
+	d.ListingBusy = r.listingBusy(d.Listings, now)
 
 	// Reviews (FR-T2): released ones, plus the viewer's own.
 	var reviews []dbq.Review
@@ -177,7 +191,8 @@ func (s *Service) buildSnapshot(ctx context.Context, q *dbq.Queries, viewer *Vie
 		d.Reviews = append(d.Reviews, reviewFromRow(x))
 	}
 
-	// Wanted board: posts are public; offers only for the requester, the offering provider and admins.
+	// Wanted board: open posts are public (location fuzzed), the requester sees all their own posts; offers only for
+	// the requester, the offering provider and admins.
 	wanted, err := q.ListWanted(ctx)
 	r.ok(err)
 	offers, err := q.ListWantedOffers(ctx)
@@ -187,6 +202,13 @@ func (s *Service) buildSnapshot(ctx context.Context, q *dbq.Queries, viewer *Vie
 		offersOf[o.WantedID] = append(offersOf[o.WantedID], offerFromRow(o))
 	}
 	for _, w := range wanted {
+		own := w.RequesterID == me
+		if !all && !own && w.Status != "terbuka" {
+			continue
+		}
+		if !all && !own {
+			w.Lat, w.Lng = geo.FuzzPoint(w.ID, w.Lat, w.Lng)
+		}
 		var visible []domain.WantedOffer
 		for _, o := range offersOf[w.ID] {
 			if all || w.RequesterID == me || o.ProviderID == me {
@@ -324,12 +346,122 @@ func (s *Service) loadPrivateOf(r *snapReader, d *domain.Data, me string) {
 	for _, f := range fs {
 		d.Favorites[f.UserID] = append(d.Favorites[f.UserID], f.ListingID)
 	}
-	cr, err := q.ListChatReadsOfUser(ctx, me)
-	r.ok(err)
-	for _, c := range cr {
-		d.ChatReads[c.UserID+":"+c.BookingID] = msOf(c.ReadAt)
+	// Read markers of both parties of the viewer's bookings ("Dibaca" in the chat).
+	rows, err := r.tx.Query(ctx, `SELECT c.user_id, c.booking_id, c.read_at FROM chat_reads c JOIN bookings b ON b.id = c.booking_id
+		WHERE b.renter_id = $1 OR b.provider_id = $1 ORDER BY c.booking_id, c.user_id`, me)
+	if r.ok(err) {
+		defer rows.Close()
+		for rows.Next() {
+			var uid, bid string
+			var at time.Time
+			if !r.ok(rows.Scan(&uid, &bid, &at)) {
+				return
+			}
+			d.ChatReads[uid+":"+bid] = msOf(at)
+		}
+		r.ok(rows.Err())
 	}
 }
+
+// publicStats computes the public reputation of every user (web trustScore, moved to the server): completed
+// rentals (+ seed base count), disputes on their bookings, strikes, and the trust score over visible reviews.
+func (r *snapReader) publicStats(now int64) map[string]*domain.PublicStats {
+	out := map[string]*domain.PublicStats{}
+	rows, err := r.tx.Query(r.ctx, `
+		SELECT u.id, u.verification_status = 'terverifikasi', coalesce(u.base_rating, 0), coalesce(u.base_rating_count, 0), u.strikes,
+		       coalesce(c.n, 0)::int, coalesce(d.n, 0)::int, coalesce(rv.ratings, '{}')
+		FROM users u
+		LEFT JOIN (SELECT uid, count(*) AS n FROM (
+		             SELECT renter_id AS uid FROM bookings WHERE status = 'COMPLETED'
+		             UNION ALL SELECT provider_id FROM bookings WHERE status = 'COMPLETED') x GROUP BY uid) c ON c.uid = u.id
+		LEFT JOIN (SELECT uid, count(*) AS n FROM (
+		             SELECT b.renter_id AS uid FROM disputes x JOIN bookings b ON b.id = x.booking_id
+		             UNION ALL SELECT b.provider_id FROM disputes x JOIN bookings b ON b.id = x.booking_id) y GROUP BY uid) d ON d.uid = u.id
+		LEFT JOIN (SELECT to_id, array_agg(rating ORDER BY ord) AS ratings FROM reviews
+		           WHERE released OR visible_at <= $1 GROUP BY to_id) rv ON rv.to_id = u.id`, tsOf(now))
+	if !r.ok(err) {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var verified bool
+		var base float64
+		var baseCount, strikes, completed, disputes int
+		var ratings []float64
+		if !r.ok(rows.Scan(&id, &verified, &base, &baseCount, &strikes, &completed, &disputes, &ratings)) {
+			return out
+		}
+		completed += baseCount
+		rating := domain.CombineRating(base, baseCount, ratings)
+		out[id] = &domain.PublicStats{CompletedRentals: completed, Disputes: disputes, Strikes: strikes,
+			TrustScore: domain.TrustScore(verified, rating, completed, disputes, strikes)}
+	}
+	r.ok(rows.Err())
+	return out
+}
+
+// listingBusy returns, per listing in the snapshot, the merged date ranges booked by ACCEPTED/ACTIVE/DISPUTED
+// bookings that end today or later (WIB), with the number of units in use on each day. No renter identity.
+func (r *snapReader) listingBusy(listings []*domain.Listing, now int64) map[domain.ID][]domain.BusyRange {
+	out := map[domain.ID][]domain.BusyRange{}
+	if len(listings) == 0 {
+		return out
+	}
+	ids := make([]string, 0, len(listings))
+	for _, l := range listings {
+		ids = append(ids, l.ID)
+	}
+	rows, err := r.tx.Query(r.ctx, `SELECT listing_id, start_date, end_date FROM bookings
+		WHERE listing_id = ANY($1) AND status IN ('ACCEPTED', 'ACTIVE', 'DISPUTED') AND end_date >= $2`,
+		ids, dateOf(domain.IsoDate(now)))
+	if !r.ok(err) {
+		return out
+	}
+	defer rows.Close()
+	days := map[string]map[string]int{} // listing → YYYY-MM-DD → units
+	for rows.Next() {
+		var lid string
+		var start, end time.Time
+		if !r.ok(rows.Scan(&lid, &start, &end)) {
+			return out
+		}
+		if days[lid] == nil {
+			days[lid] = map[string]int{}
+		}
+		for t := start; !t.After(end); t = t.AddDate(0, 0, 1) {
+			days[lid][isoOf(t)]++
+		}
+	}
+	if !r.ok(rows.Err()) {
+		return out
+	}
+	for lid, perDay := range days {
+		out[lid] = MergeBusyDays(perDay)
+	}
+	return out
+}
+
+// MergeBusyDays turns per-day unit counts into runs of consecutive days with the same count, sorted by date.
+func MergeBusyDays(perDay map[string]int) []domain.BusyRange {
+	dates := make([]string, 0, len(perDay))
+	for d := range perDay {
+		dates = append(dates, d)
+	}
+	sort.Strings(dates)
+	var out []domain.BusyRange
+	for _, d := range dates {
+		n := perDay[d]
+		if k := len(out) - 1; k >= 0 && out[k].Count == n && nextDay(out[k].End) == d {
+			out[k].End = d
+			continue
+		}
+		out = append(out, domain.BusyRange{Start: d, End: d, Count: n})
+	}
+	return out
+}
+
+func nextDay(iso string) string { return isoOf(dateOf(iso).AddDate(0, 0, 1)) }
 
 func (s *Service) attachDisputes(r *snapReader, rows []dbq.Dispute) []*domain.Dispute {
 	if len(rows) == 0 {

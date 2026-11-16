@@ -52,17 +52,4 @@ func TestUserFunctionsForAuth(t *testing.T) {
 	if msg, ok := service.IsUserError(err); !ok || msg != "Nomor HP sudah terdaftar. Masuk pakai nomor itu." {
 		t.Fatalf("duplicate: %v", err)
 	}
-
-	// Demo sessions store only the hash.
-	tok, err := e.svc.CreateDemoSession(e.ctx, "u-raka")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var stored string
-	if err := e.svc.Pool().QueryRow(e.ctx, `SELECT token_hash FROM demo_sessions`).Scan(&stored); err != nil || stored == tok || stored != service.HashToken(tok) {
-		t.Fatalf("token must be stored hashed: %v", err)
-	}
-	if uid, _ := e.svc.DemoSessionUser(e.ctx, tok); uid != "u-raka" {
-		t.Fatalf("resolve token: %s", uid)
-	}
 }

@@ -173,6 +173,20 @@ func (t *txn) payBooking(renterID, id domain.ID, method string) error {
 	if b.Payment.Status == "lunas" {
 		return domain.Fail("Sudah lunas.")
 	}
+	switch t.s.opt.PaymentMode {
+	case PaymentOffline:
+		// Pilot (PRD §9.3): no money moves through Sewain. The renter only records paying the provider directly.
+		if method != "langsung" {
+			return domain.Fail("Pembayaran lewat Sewain belum tersedia. Bayar langsung ke penyedia, lalu tandai \"Sudah bayar langsung\".")
+		}
+		b.Payment.Status, b.Payment.Method, b.Payment.PaidAt = "lunas", domain.Ptr(method), domain.Ptr(t.now)
+		t.saveBooking(b)
+		t.notify(b.ProviderID, "booking", "Penyewa menandai sudah bayar", t.titleOf(b)+": penyewa menandai sudah bayar langsung ke kamu. Cek dulu, lalu konfirmasi.", domain.BookingHref(b))
+		t.sysMsg(id, "Penyewa menandai sudah bayar langsung ke penyedia.")
+		return nil
+	case PaymentGateway:
+		return domain.Fail("Pembayaran online belum tersedia.")
+	}
 	if !domain.Contains([]string{"qris", "va", "ewallet", "tunai"}, method) {
 		method = "qris"
 	}
@@ -180,6 +194,25 @@ func (t *txn) payBooking(renterID, id domain.ID, method string) error {
 	t.saveBooking(b)
 	t.notify(b.ProviderID, "booking", "Pembayaran diterima (simulasi)", t.titleOf(b)+": "+domain.Rupiah(b.Payment.Total)+" lunas via Sewain.", domain.BookingHref(b))
 	t.sysMsg(id, "Pembayaran "+domain.Rupiah(b.Payment.Total)+" ditandai lunas (simulasi "+strings.ToUpper(method)+").")
+	return nil
+}
+
+// confirmDirectPayment: the provider confirms receiving a direct payment the renter marked (PAYMENT_MODE=offline).
+func (t *txn) confirmDirectPayment(providerID, id domain.ID) error {
+	b, err := t.partyBooking(providerID, id, "provider")
+	if err != nil {
+		return err
+	}
+	if b.Payment.Status != "lunas" || domain.Deref(b.Payment.Method, "") != "langsung" {
+		return domain.Fail("Penyewa belum menandai sudah bayar langsung.")
+	}
+	if b.Payment.ConfirmedAt != nil {
+		return domain.Fail("Pembayaran sudah dikonfirmasi.")
+	}
+	b.Payment.ConfirmedAt = domain.Ptr(t.now)
+	t.saveBooking(b)
+	t.notify(b.RenterID, "booking", "Pembayaran dikonfirmasi", t.titleOf(b)+": penyedia sudah menerima pembayaranmu.", domain.BookingHref(b))
+	t.sysMsg(id, "Penyedia mengonfirmasi pembayaran langsung sudah diterima.")
 	return nil
 }
 

@@ -2,12 +2,12 @@ package service
 
 import (
 	"context"
-	"math"
 	"strings"
 	"unicode"
 
 	"github.com/mrfroglab/sewain-api/internal/db/dbq"
 	"github.com/mrfroglab/sewain-api/internal/domain"
+	"github.com/mrfroglab/sewain-api/internal/geo"
 )
 
 type SearchParams struct {
@@ -87,7 +87,7 @@ func (s *Service) Search(ctx context.Context, p SearchParams) (SearchResult, err
 	res := SearchResult{Hits: []SearchHit{}, Query: "ST_DWithin(location, point, LEAST(radius_penyewa, radius_penyedia))"}
 	for _, r := range rows {
 		if r.Visible {
-			res.Hits = append(res.Hits, SearchHit{ID: r.ID, DistanceKm: math.Round(r.DistanceKm*10) / 10})
+			res.Hits = append(res.Hits, SearchHit{ID: r.ID, DistanceKm: geo.RoundDistanceKm(r.DistanceKm)})
 		} else {
 			res.HiddenByProviderReach++
 		}
