@@ -1,159 +1,209 @@
 # sewain-api
 
-Backend **Sewain** (PRD §13): Go + Postgres/PostGIS. Server ini sumber data tunggal untuk web, sehingga penyewa,
-penyedia, dan admin bisa memakai perangkat berbeda.
+Backend **Sewain** (PRD §13), marketplace sewa barang P2P untuk pilot kampus UGM. Go + Postgres/PostGIS. Server
+ini sumber data tunggal untuk web: penyewa, penyedia, dan admin bisa memakai perangkat berbeda.
 
-- Live (demo, v1): https://sewain.hallojanu.me/api/health · staging (v2): https://sewain-staging.hallojanu.me/api/health
-- Stack: Go 1.27 (`net/http`, `pgx/v5`, `coder/websocket`), Postgres 16 + PostGIS 3.4, goose (migrasi), sqlc (query
-  bertipe), image distroless
-- Rencana: [`ROADMAP.md`](../ROADMAP.md) §2–§5. Titik integrasi untuk modul auth/media/notify:
-  [`docs/integration/core-v2.md`](docs/integration/core-v2.md)
+- Demo (v1, dibekukan di `main`): https://sewain.hallojanu.me/api/health
+- Staging (v2, branch `develop`): https://sewain-staging.hallojanu.me/api/health
+- Stack: Go 1.27 (`net/http`, `pgx/v5`, `coder/websocket`), Postgres 16 + PostGIS 3.4, goose (migrasi), sqlc
+  (query bertipe), Prometheus client, image distroless `nonroot`.
+- Rencana: `ROADMAP.md` §2–§5 (repo induk). Runbook operasional: [`deploy/OPS.md`](deploy/OPS.md). Catatan
+  pemasangan per modul: [`docs/integration/`](docs/integration/), keputusan gelombang 2:
+  [`docs/integration/integrate-v2.md`](docs/integration/integrate-v2.md). Review keamanan:
+  [`docs/security/review-wave1.md`](docs/security/review-wave1.md).
 
 ## Arsitektur v2
 
 ```
-[sewain-web] ──HTTPS/JSON──► httpapi ──► service ──► Postgres + PostGIS
-     ▲                         │  (satu transaksi per aksi, FOR UPDATE, change_log → version)
-     └── WebSocket /events ◄───┘──► PhotoStore (disk lokal; R2 lewat modul media)
+browser ─► Cloudflare Tunnel ─► Caddy ─► api :8080 ─┬─► Postgres + PostGIS (satu transaksi per aksi)
+                                                    ├─► media.Storage (disk lokal / R2, write-once)
+             WebSocket /api/v1/events ◄── Hub ◄─────┤◄── LISTEN/NOTIFY (fan-out antar instance)
+                                                    └─► outbox ─► dispatcher ─► web push / email
+                              :9090 /metrics (internal, tidak lewat Caddy)
 ```
 
 | Paket | Isi |
 |---|---|
-| `internal/domain` | Aturan bisnis murni tanpa state: harga, komisi, saran jaminan, hash kesepakatan, validasi listing, kata terlarang, grid lokasi publik, tipe JSON (cermin `sewain-web/src/lib/types.ts`) |
-| `internal/service` | Semua aksi sebagai transaksi Postgres: kunci baris (`SELECT … FOR UPDATE`) pada booking/listing/sengketa yang diubah, retry otomatis untuk serialization failure/deadlock (maks 3), notifikasi in-app + pesan sistem + audit di transaksi yang sama. Juga snapshot per viewer, job berkala, idempotency, pencarian, seed/reset demo |
-| `internal/db` | Pool pgx, `WithTx`, advisory lock, migrasi goose (embed, jalan saat start dengan advisory lock, out-of-order diizinkan), query sqlc di `internal/db/dbq` |
-| `internal/httpapi` | Handler HTTP (kontrak v1), `ViewerResolver` (token demo sekarang), `PhotoStore` (disk lokal sekarang), hub WebSocket |
-| `internal/seed` | `seed.json` dari web, digeser ke "sekarang" |
+| `cmd/api` | Proses: serve, `migrate`, `admin grant/revoke`, `vapid gen`, `healthcheck`. Shutdown rapi. |
+| `internal/app` | Wiring semua modul + runner latar (job waktu, retensi, dispatcher outbox, listener). `apptest` = harness tes E2E. |
+| `internal/config` | Semua env, validasi saat start (produksi menolak konfigurasi demo, semua galat dilaporkan sekaligus). |
+| `internal/httpapi` | Rute HTTP + rantai middleware platform, snapshot dengan URL foto bertanda tangan per viewer. |
+| `internal/service` | Aksi transaksional (aturan dari `internal/domain`), snapshot per viewer, KYC mirror, retensi, ekspor/hapus akun, metrik admin, impor CSV. |
+| `internal/domain` | Aturan bisnis murni (tanpa I/O), tipe JSON kontrak web, skor kepercayaan. |
+| `internal/db` | Pool pgx, migrasi goose (advisory lock, out-of-order), query sqlc (`dbq`). |
+| `internal/auth`, `internal/kyc`, `internal/crypto` | OTP, sesi (cookie/bearer, CSRF), consent, admin; KYC terenkripsi; AES-GCM + HMAC. |
+| `internal/media`, `internal/geo` | Storage, validasi unggahan, strip GPS, URL bertanda tangan, watermark, rencana retensi; lokasi publik. |
+| `internal/realtime`, `internal/notify` | Hub WebSocket per user + Publisher/Listener; outbox, web push VAPID, email. |
+| `internal/platform/*` | Middleware (request ID, IP klien, log JSON tanpa PII, recover, header keamanan, CORS, batas body, timeout), rate limit, metrics, health, server. |
 
-Prinsip penting:
+### Alur penting
 
-- **Satu aksi = satu transaksi.** Aturan bentrok jadwal (FR-R4, stok akun Toko) dihitung setelah baris listing dikunci,
-  jadi `createBooking`/`acceptBooking` paralel tidak pernah melebihi stok. `acceptBooking` sekarang juga memeriksa stok.
-- **Versi** = `max(change_log.version)`, dibaca di transaksi snapshot yang sama, sehingga versi yang dilaporkan selalu
-  sudah terlihat datanya. Setiap commit yang mengubah data menulis satu baris `change_log` (audiens: user terkait, admin,
-  publik) lalu memanggil listener (`service.Change`).
-- **Urutan koleksi** di snapshot sama dengan v1 (notifikasi/audit terbaru di depan, pesan dari terlama, …) lewat kolom
-  `ord` dari satu sequence global.
-- **Tabel bukti append-only:** trigger menolak UPDATE/DELETE/TRUNCATE pada `photos` dan `audit_log` kecuali transaksi
-  menyetel `SET LOCAL sewain.retention = 'on'` (job retensi, reset demo). Pesan chat tidak bisa dihapus selama booking
-  berjalan/bersengketa (FR-C3).
-- **Job berkala** tiap 15 detik dengan advisory lock (aman banyak instance): kadaluarsa 24 jam, flag telat, selesai
-  otomatis 48 jam setelah jaminan dikembalikan, sengketa L1 → L2 setelah 48 jam, rilis ulasan 7 hari (FR-T2). Jam
-  bisa disuntik (`service.Options.Now`).
-- **Analitik:** view `analytics_bookings_by_status`, `analytics_rent_value` (termasuk komisi "seandainya aktif"),
-  `analytics_disputes_by_case`, `analytics_request_funnel`, `analytics_weekly_completed` (North Star).
-
-### Snapshot per viewer (`SNAPSHOT_SCOPE`)
-
-| Data | Tamu | User | Admin / `full` |
-|---|---|---|---|
-| Listing | Aktif, lokasi dibulatkan ke grid ± 250 m | + milik sendiri (semua status, titik presisi) + listing dari booking sendiri | Semua |
-| Profil user | Publik: nama depan/nickname, tipe akun, toko, area, kampus, status verifikasi, rating, tanggal gabung | + profil sendiri lengkap | Semua |
-| HP, email, NIK, strike | Tidak | Milik sendiri | Ya |
-| Booking, pesan, foto bukti, sengketa | Tidak | Booking tempat ia jadi pihak (+ foto yang ia unggah) | Semua |
-| Ulasan | Yang sudah dirilis (FR-T2) | + tulisan sendiri | Semua |
-| Notifikasi, favorit, chatReads, laporan, strike, verifikasi | Tidak | Milik sendiri | Semua |
-| Papan permintaan | Semua post, tanpa tawaran | + tawaran di post sendiri / tawaran sendiri | Semua |
-| Komisi, aturan jaminan, kata terlarang | Ya | Ya | Ya |
-| Audit log | Tidak | Tidak | Ya |
-
-`scoped` adalah default dan satu-satunya yang boleh di produksi. `full` (persis v1) hanya diterima bersama
-`DEMO_MODE=true`. Respons membawa `ETag`; `If-None-Match` yang cocok → `304`.
-
-> Web saat ini mengambil `/api/v1/state` tanpa token, jadi dengan `scoped` web melihat tampilan tamu sampai worker
-> `web-v2` (F6.3) mengirim token/cookie. Staging yang menjalankan web lama perlu `SNAPSHOT_SCOPE=full` sementara.
+- **Aksi** (`POST /api/v1/actions/{name}`): satu transaksi Postgres, aktor = argumen pertama dan harus pemilik
+  sesi. Pelanggaran aturan = `200 {ok:false,error}`. `Idempotency-Key` (header atau field body `idempotencyKey`,
+  header menang): kunci sama → respons asli; kunci sama dengan argumen lain → `409`.
+- **Snapshot** (`GET /api/v1/state`): bentuk `DataState` web + `scope`, `viewerId`, `listingBusy`,
+  `users[].publicStats`, `reviews[].visibleAt`. `SNAPSHOT_SCOPE=scoped` (wajib di produksi) menyaring per viewer
+  (ROADMAP §4): tamu = data publik; user = + datanya sendiri dan booking tempat ia jadi pihak; admin = semua.
+  Lokasi listing/papan milik orang lain = `geo.FuzzPoint` (≤ 400 m). `src` foto bukti = URL bertanda tangan untuk
+  viewer itu (pihak: salinan ber-watermark, admin: asli); foto yang tidak boleh dilihat tidak dikirim.
+- **Realtime**: setiap commit menulis `change_log` (versi) lalu event `{type:"changed",version}` hanya ke pihak
+  terkait + admin (atau semua kalau data publik berubah), lintas instance lewat `LISTEN/NOTIFY`.
+- **Notifikasi**: setiap notifikasi in-app mengantre ke `notification_outbox` di transaksi yang sama; dispatcher
+  mengirim (retry eksponensial, dead-letter). Notifikasi "ke admin" dikirim ke semua akun ber-role admin.
+- **KYC produksi**: `POST /api/v1/kyc/submissions` (terenkripsi) → `verification_requests` (`manual`, user
+  `menunggu`) → admin memutuskan lewat `reviewVerification` atau `/api/v1/admin/kyc/{id}/decision` (keduanya
+  `kyc.Decide`) → user `terverifikasi` + `nik_masked`. Simulasi `submitVerification` hanya di `DEMO_MODE`.
+- **Pembayaran**: `PAYMENT_MODE=offline` (default di luar demo): penyewa `payBooking(..., "langsung")`, penyedia
+  `confirmDirectPayment`. `simulated` (default demo): perilaku demo. `gateway`: Fase 8, ditolak saat start.
+- **Pencarian**: radius hanya 1/3/5/10/25 km (dibulatkan ke atas), keanggotaan dan jarak dihitung dari titik
+  publik, jadi pencarian berulang tidak bisa mentrilaterasi titik asli (review C1).
 
 ## Endpoint
 
-| Method | Path | Isi |
+| Metode + path | Akses | Isi |
 |---|---|---|
-| GET | `/api/health` | Status server + database |
-| GET | `/api/v1/state` | Snapshot `DataState` per viewer + `serverNow`, `ETag` |
-| POST | `/api/v1/auth/demo-login` | `{userId}` → token sesi (khusus DEMO_MODE; yang disimpan hanya hash SHA-256) |
-| GET | `/api/v1/auth/me` | User dari token |
-| POST | `/api/v1/actions/{name}` | `{args:[...], id?}` → `{ok, error?, value?, version}`. Aktor (argumen pertama) wajib pemilik sesi (403). Header opsional `Idempotency-Key` |
-| POST | `/api/v1/photos` | multipart `file, stage, bookingId, angle, source, width, height` → PhotoRecord (hash + timestamp dari server) |
-| POST | `/api/v1/photos/demo` | `{url, stage, bookingId?, angle?}`: daftarkan foto contoh `/img/*` (di-hash server) |
-| GET | `/api/v1/photos/{id}` | Berkas foto + header `X-Content-SHA256` |
-| GET | `/api/v1/listings/search` | `lat, lng, radiusKm` + opsional `q` (full-text), `kategori, min, max, serah, jaminan, penyedia, mulai, selesai` |
-| GET | `/api/v1/events` | WebSocket: `{"type":"hello"\|"changed","version":n}` |
+| `GET /api/health` | publik | Liveness: `{ok, version, commit, demoMode, clients}` (tanpa DB) |
+| `GET /api/ready` | publik | DB + semua migrasi terpasang, 503 kalau belum |
+| `GET /api/v1/config` | publik | `{ok, appEnv, demoMode, paymentMode, auth:{otpProvider}, push:{vapidPublicKey}\|null, legal:{termsVersion, privacyVersion}}`, `max-age=60` |
+| `GET /api/v1/state` | tamu/user | Snapshot per viewer, `ETag` / `If-None-Match` |
+| `POST /api/v1/actions/{name}` | user | Aksi web (≥ 40, lihat `internal/service/dispatch.go`), termasuk `confirmDirectPayment` |
+| `GET /api/v1/listings/search` | publik | `lat,lng,radiusKm,kategori,min,max,serah,jaminan,penyedia,q,mulai,selesai` → `{hits:[{id,distanceKm}], hiddenByProviderReach, radiusKm}` |
+| `GET /api/v1/events` | tamu/user | WebSocket. Cookie, atau `?token=` hanya kalau `SESSION_BEARER_LOGIN` (demo) |
+| `POST /api/v1/auth/otp/request`, `POST /api/v1/auth/otp/verify` | publik | OTP; verify membuat akun (+ consent) dan sesi (cookie, atau token kalau bearer diizinkan) |
+| `POST /api/v1/auth/demo-login` | publik, `DEMO_MODE` | Sesi bearer untuk persona demo (sesi asli `auth_sessions`) |
+| `POST /api/v1/auth/logout`, `GET/DELETE /api/v1/auth/sessions[/{id}]`, `GET /api/v1/auth/me` | user | Sesi |
+| `POST /api/v1/photos` | user | Unggah foto (multipart `file, stage, bookingId?, angle?, source`); bukti hanya untuk pihak booking |
+| `POST /api/v1/photos/demo` | user | Daftarkan foto contoh `/img/*` |
+| `GET\|HEAD /api/v1/photos/{id}` | tanda tangan / sesi berhak | Foto (referensi publik); `X-Content-SHA256`, `X-Original-SHA256` |
+| `POST /api/v1/kyc/submissions`, `GET /api/v1/kyc/status` | user | Unggah KTP + selfie, status |
+| `GET /api/v1/admin/kyc[/{id}]`, `POST /api/v1/admin/kyc/{id}/decision`, `GET /api/v1/admin/kyc/{id}/files/{ktp\|selfie}`, `POST /api/v1/admin/kyc/blacklist` | admin | Antrean KYC (akses berkas diaudit) |
+| `GET /api/v1/push/vapid-key`, `POST/DELETE /api/v1/push/subscriptions` | publik / user | Web push |
+| `GET/PUT /api/v1/me/notification-prefs` | user | Preferensi notifikasi + jam tenang |
+| `GET /api/v1/me/export` | user | Semua data milik user (JSON, unduhan) |
+| `DELETE /api/v1/me` | user | Hapus akun = anonimisasi (409 kalau ada sewa berjalan/sengketa terbuka) |
+| `GET /api/v1/admin/metrics` | admin | Booking per status, nilai sewa + komisi "seandainya", sengketa per kategori, funnel request (% direspons < 24 jam), sewa selesai per minggu |
+| `POST /api/v1/admin/listings/import[?dryRun=1]` | admin | Impor listing CSV (lihat di bawah) |
 
-Aksi: registerUser, updateUser, submitVerification, reviewVerification, createListing, updateListing,
-setListingStatus, toggleFavorite, createBooking, acceptBooking, declineBooking, cancelBooking, payBooking,
-submitCheckout, addCheckoutPhotos, agreeCheckout, rejectAtCheckout, submitCheckin, returnCollateral, confirmCollateral,
-submitReview, sendMessage, markThreadRead, markNotificationsRead, openDispute, proposeSolution, respondProposal,
-escalateDispute, adminRecommend, resolveDispute, createReport, resolveReport, addStrike, setUserStatus,
-updateCommission, updateCollateralRules, setBannedKeywords, createWanted, offerWanted, closeWanted. Kontrol demo
-(DEMO_MODE, user mana pun yang login): advanceClock, resetClock, resetDemo.
+Galat selalu `{"ok":false,"error":"<Bahasa Indonesia>"}`. Mutasi lewat cookie wajib `Origin` yang diizinkan (CSRF).
+Rate limit per rute: `auth` 10/menit (OTP, demo-login), `upload` 20/menit, `write` 60/menit, `public` 120/menit/IP.
 
-**Idempotency-Key:** aksi dengan kunci yang sama (per user) dijalankan sekali. Kirim ulang → respons yang sama persis
-(header `Idempotency-Replayed: true`), termasuk penolakan aturan. Kunci yang sama untuk permintaan lain → `422`.
-Kunci dibersihkan setelah 24 jam.
+### Impor listing CSV (Early Lender, PRD §18.1)
 
-**Pencarian:** aturan radius dua arah `ST_DWithin(location, titik, LEAST(radius_penyewa, radius_penyedia))` (FR-S3),
-full-text `simple` (judul + deskripsi + kategori, cocok awalan kata), filter tanggal `mulai`/`selesai` yang menghitung
-stok (booking ACCEPTED/ACTIVE yang bertumpuk < stok). Urut jarak lalu relevansi. Jarak dibulatkan ke 100 m (FR-S6).
+Baris pertama = judul kolom (urutan bebas, `,` atau `;`). Daftar `|`. Wajib: `owner_phone, title, category,
+price_per_day, item_value, lat, lng, handover, collateral, photos` (+ `owner_name` kalau pemilik belum punya akun).
+Opsional: `early_lender, description, condition_notes, price_per_week, area_id, radius_km, stock, meeting_point,
+late_fee_per_day, cancellation`. Contoh:
 
-## Menjalankan
-
-Go tidak perlu terpasang: `scripts/go.sh` menjalankan Go 1.27 di Docker (cache bersama).
-
-```bash
-cp .env.example .env
-make db-up                 # Postgres + PostGIS lokal di 127.0.0.1:55491
-make run                   # migrasi (advisory lock) + seed demo otomatis kalau DB kosong dan DEMO_MODE=true
-scripts/go.sh run ./cmd/api migrate status   # atau: make migrate-status
-scripts/go.sh run ./cmd/api migrate up       # migrasi saja lalu keluar (MIGRATE_ON_START=false untuk mematikan di start)
-make generate              # sqlc generate (image sqlc/sqlc:1.30.0); commit hasil di internal/db/dbq
-make generate-check        # gagal kalau kode sqlc yang di-commit basi (untuk CI)
+```csv
+owner_phone,owner_name,early_lender,title,category,price_per_day,item_value,lat,lng,area_id,handover,collateral,photos
+0857 1234 5678,Naila Putri,ya,Kebaya brokat hijau,pakaian-acara,40000,900000,-7.7652,110.3752,sendowo,cod,deposit:25%,/img/a.webp|/img/b.webp|/img/c.webp
 ```
 
-Tes:
+`collateral`: `identitas:KTM/SIM`, `deposit:50000`, `deposit:25%`, `barang:<deskripsi>`. Semua baris divalidasi
+dengan aturan yang sama seperti form web; satu baris salah = tidak ada yang disimpan (`422` + galat per baris).
+Pemilik baru dibuat dengan verifikasi `belum`, dan listingnya `jeda` sampai pemilik terverifikasi lalu
+mengaktifkannya. Deskripsi kolom lengkap: `service.ImportColumns` (juga dikirim di respons galat kolom).
 
-```bash
-make test                                  # tanpa DB: tes integrasi di-skip
+## CLI
+
+```sh
+api                              # serve (migrasi otomatis kalau MIGRATE_ON_START=true)
+api migrate [up|status]
+api admin grant 0812xxxxxxx      # user harus sudah pernah masuk lewat OTP; diaudit (aktor "cli")
+api admin revoke 0812xxxxxxx
+api vapid gen                    # cetak VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY baru
+api healthcheck                  # dipakai HEALTHCHECK Docker
+```
+
+Di container: `docker exec <container-api> /app/api admin grant 0812…`.
+
+## Environment
+
+Contoh lengkap: [`deploy/.env.example`](deploy/.env.example). Kolom "Prod" = wajib diisi saat `APP_ENV=production`.
+
+| Nama | Prod | Contoh | Keterangan |
+|---|---|---|---|
+| `DATABASE_URL` | ya | `postgres://sewain:…@sewain-db:5432/sewain?sslmode=disable` | |
+| `APP_ENV` | ya | `production` | `development` \| `demo` \| `staging` \| `production`; nilai lain ditolak |
+| `DEMO_MODE` | – | `false` | Login demo, eKYC/bayar simulasi, jam demo. **Ditolak** di produksi |
+| `PORT` | – | `8080` | |
+| `MIGRATE_ON_START` | – | `true` | |
+| `SNAPSHOT_SCOPE` | – | `scoped` | `full` hanya dengan `DEMO_MODE`, ditolak di produksi |
+| `PAYMENT_MODE` | – | `offline` | `simulated` (default demo, ditolak di produksi) \| `offline` \| `gateway` (belum ada) |
+| `CORS_ORIGINS` | ya | `https://sewain.me` | Origin web, pisah koma. `*` ditolak di produksi |
+| `ALLOWED_ORIGINS` | – | `https://sewain.me` | Cek CSRF cookie. Default = `CORS_ORIGINS` tanpa `*` |
+| `TRUSTED_PROXY_CIDRS` | ya | `172.16.0.0/12` | Proxy yang header IP-nya dipercaya (subnet `gateway-net`) |
+| `REQUEST_TIMEOUT` | – | `15s` | Batas per request (WebSocket dikecualikan) |
+| `LOG_LEVEL` | – | `info` | |
+| `METRICS_ADDR` | – | `127.0.0.1:9090` | `:9090` untuk scrape dari jaringan internal, `off` = mati. Jangan dipublish |
+| `RETENTION_INTERVAL` | – | `1h` | Jeda runner retensi |
+| `WEB_ORIGIN` | – | `http://sewain-web:3000` | Sumber foto contoh `/img/*` |
+| `OTP_PROVIDER` | ya | `zenziva` | `demo` (hanya DEMO_MODE) \| `echo` (staging) \| `zenziva`. demo/echo ditolak di produksi |
+| `OTP_PEPPER` | ya (+staging) | `openssl rand -base64 32` | Rahasia HMAC kode OTP |
+| `SESSION_COOKIE_SECURE` | – | `true` | Default `true` di luar development/demo |
+| `SESSION_BEARER_LOGIN` | – | `false` | Token di body + `?token=` WS (demo per tab). Ditolak di produksi |
+| `TERMS_VERSION`, `PRIVACY_VERSION` | ya | `2026-12-v1` | Versi S&K/privasi yang dicatat di `consents` |
+| `ZENZIVA_WA_URL`, `ZENZIVA_SMS_URL`, `ZENZIVA_USERKEY`, `ZENZIVA_PASSKEY`, `ZENZIVA_*` | ya (zenziva) | | Lihat `docs/integration/auth.md` §1 |
+| `KYC_KEYS` | ya (+staging) | `v1:<base64 32 byte>` | Kunci AES-GCM KYC, yang terakhir = aktif |
+| `NIK_PEPPER` | ya (+staging) | `openssl rand -base64 32` | HMAC NIK. **Tidak boleh berubah** |
+| `MEDIA_BACKEND` | – | `local` | `local` \| `s3` (R2) |
+| `UPLOAD_DIR` | – | `/data/uploads` | Root storage lokal |
+| `S3_ENDPOINT`/`R2_ACCOUNT_ID`, `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_USE_SSL`, `S3_PREFIX` | ya (s3) | | Alias `R2_*` |
+| `S3_RETENTION_ACCESS_KEY_ID`, `S3_RETENTION_SECRET_ACCESS_KEY` | ya (s3) | | Kredensial yang boleh hapus (job retensi) |
+| `MEDIA_SIGNING_KEY` | ya (+staging) | `openssl rand -hex 32` | HMAC URL foto |
+| `MEDIA_SIGNING_KEY_PREVIOUS` | – | | Kunci lama selama rotasi (≥ 75 menit) |
+| `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` | untuk push | `api vapid gen`, `mailto:ops@sewain.me` | Kosong = push mati |
+| `MAIL_PROVIDER` | – | `none` | `none` \| `smtp` \| `resend` \| `log` |
+| `MAIL_FROM`, `PUBLIC_URL` | kalau email | `Sewain <noreply@sewain.me>`, `https://sewain.me` | |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_SECURITY` | kalau smtp | | |
+| `RESEND_API_KEY` | kalau resend | | |
+| `NOTIFY_PREFS_PATH` | – | `/profil/notifikasi` | Tautan preferensi di email |
+
+`CLIENT_IP_HEADER` tidak dipakai lagi: IP klien selalu dari `TRUSTED_PROXY_CIDRS`.
+
+### Kunci
+
+```sh
+openssl rand -base64 32                    # OTP_PEPPER, NIK_PEPPER, tiap kunci KYC_KEYS (v1:<nilai>)
+openssl rand -hex 32                       # MEDIA_SIGNING_KEY
+docker run --rm ghcr.io/mrfroglab/sewain-api:develop vapid gen   # atau: scripts/go.sh run ./cmd/api vapid gen
+```
+
+Simpan setiap kunci di dua tempat (`.env` server + password manager). Rotasi: [`deploy/OPS.md`](deploy/OPS.md).
+Di `development`/`demo` kunci yang kosong diganti kunci acak sementara (data terenkripsi dan URL foto tidak berlaku
+lagi setelah restart).
+
+## Menjalankan lokal
+
+Go tidak wajib terpasang: `scripts/go.sh` menjalankan Go 1.27.4 di Docker.
+
+```sh
+make db-up                                  # Postgres+PostGIS dev (docker-compose.dev.yml)
+cp .env.example .env                        # DEMO_MODE=true, APP_ENV=development
+make run                                    # http://localhost:8080/api/health
+
 export TEST_DATABASE_URL=$(scripts/test-db.sh up)   # Postgres sekali pakai per worktree
-scripts/go.sh test -count=1 ./...          # atau: make test-integration
+scripts/go.sh vet ./... && scripts/go.sh test ./...  # unit + integrasi + E2E HTTP (internal/app)
 scripts/test-db.sh down
-scripts/compare-v1.sh                      # bandingkan /api/v1/state + pencarian v1 vs v2 di seed yang sama,
-                                           # lalu start v2 di atas DB berskema v1
+make generate                               # sqlc (image dipin) setelah mengubah internal/db/queries
 ```
 
-Setiap tes integrasi memakai database baru (salinan dari template yang sudah dimigrasi). Isinya: port tes engine v1,
-tes per aksi (sukses + ditolak), siklus HTTP lengkap ala `sewain-web/e2e/api.mjs`, privasi snapshot, idempotency,
-konkurensi stok (≥ 20 goroutine), job dengan jam palsu, pencarian, migrasi `00001` di atas skema v1, trigger
-append-only.
+Lint seperti CI:
 
-Web lokal ke API ini: `NEXT_PUBLIC_API_URL=http://localhost:8080 pnpm dev` di `sewain-web`.
+```sh
+docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e GOCACHE=/cache/build -e GOMODCACHE=/cache/mod \
+  -e GOLANGCI_LINT_CACHE=/cache/lint -e GOFLAGS=-buildvcs=false -v sewain-go-cache:/cache \
+  -v "$PWD":/src -w /src golangci/golangci-lint:v2.15.0 golangci-lint run ./...
+```
 
-### Environment
+## Migrasi
 
-| Variabel | Default | Isi |
-|---|---|---|
-| `PORT` | `8080` | Port HTTP |
-| `DATABASE_URL` | (wajib) | DSN Postgres |
-| `APP_ENV` | `development` | `demo`, `development`, `staging`, `production` |
-| `DEMO_MODE` | `false` | Login demo, jam demo, reset, seed otomatis. **Ditolak** bersama `APP_ENV=production` |
-| `SNAPSHOT_SCOPE` | `scoped` | `scoped` (per viewer) atau `full` (seperti v1, hanya dengan `DEMO_MODE=true`) |
-| `MIGRATE_ON_START` | `true` | Jalankan migrasi goose saat start |
-| `UPLOAD_DIR` | `./data/uploads` | Folder foto (`LocalPhotoStore`) |
-| `WEB_ORIGIN` | `http://localhost:3000` | Asal `/img/*` untuk foto contoh |
-| `CORS_ORIGINS` | `http://localhost:3000` | Daftar origin, dipisah koma |
-
-Data demo (`internal/seed/seed.json`) diekspor dari seed web: `make seed-export`. Saat seeding semua timestamp dan
-tanggal digeser ke "sekarang"; jam demo (`clockOffset`) disimpan di `app_settings`. `resetDemo` = truncate + seed
-ulang dalam satu transaksi (token sesi tetap berlaku, versi tetap naik).
-
-### Migrasi
-
-Berkas goose di `internal/db/migrations/NNNNN_nama.sql` (`-- +goose Up/Down`). Rentang nomor: inti `00001–00099`,
-auth `00100–00119`, media `00120–00139`, notify `00140–00159`, ops `00160–00179`, pembayaran `00200–00249`.
-`00001` mendeteksi skema v1 (tabel JSONB dengan kolom `data`) dan men-drop tabel v1 sebelum membuat skema v2; data demo
-lalu di-seed ulang.
+goose, satu folder `internal/db/migrations` (di-embed), `allow out-of-order`, advisory lock. Rentang: inti
+`00001–00099`, auth `00100–00119`, media `00120–00139`, notify `00140–00159`, ops `00160–00179`, pembayaran
+`00200–00249`. Migrasi `00001` mengganti skema JSONB v1 kalau masih ada (DB staging lama).
 
 ## Deploy
 
-Push ke `main` → GitHub Actions menjalankan gofmt, vet, test, dan build → image `ghcr.io/mrfroglab/sewain-api` →
-runner self-hosted menjalankan pull dan restart container `sewain-api` di `/opt/stacks/apps/sewain` (db + api + web).
-`develop` → stack staging. Caddy meneruskan `/api/*` ke API dan sisanya ke web. Setup awal atau darurat:
-`deploy/deploy.sh`.
+CI (`.github/workflows/deploy.yml`): `main` → image `:latest` → stack demo, `develop` → `:develop` → staging,
+setiap build juga diberi tag `sha-<commit>` untuk rollback. Langkah, rollback, restore, rotasi kunci, insiden data:
+[`deploy/OPS.md`](deploy/OPS.md).
