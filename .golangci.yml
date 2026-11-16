@@ -1,0 +1,77 @@
+# golangci-lint v2 configuration. CI pins the binary version in .github/workflows/deploy.yml.
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    - gosec
+    - revive
+    - bodyclose
+    - sqlclosecheck
+    - rowserrcheck
+    - misspell
+  settings:
+    revive:
+      # Basic, low-noise rules only.
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+          arguments: ["disableStutteringCheck"]
+        - name: increment-decrement
+        - name: var-declaration
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unreachable-code
+        - name: redefines-builtin-id
+    gosec:
+      excludes:
+        - G104 # unchecked errors: errcheck already covers this with better exclusions
+    misspell:
+      locale: US
+      ignore-rules:
+        - cancelled # booking status value "CANCELLED" is part of the API/DB contract
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      # Tests may ignore errors from fixtures and use fixed fake secrets.
+      - path: _test\.go
+        linters: [errcheck, gosec, bodyclose]
+    paths:
+      # TODO(core-v2): v1 packages are being rewritten by the core-v2 worker. Remove each exclusion once its
+      # package passes lint; only internal/platform and new packages are linted until then.
+      - ^cmd/
+      - ^internal/config/
+      - ^internal/domain/
+      - ^internal/httpapi/
+      - ^internal/seed/
+      - ^internal/store/
+
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    generated: lax
