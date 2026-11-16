@@ -97,8 +97,8 @@ handler := cors(authSvc.Middleware(mux)) // middleware membungkus SELURUH mux
 - Job berkala (pakai advisory lock job inti, F1.7):
   - `kycSvc.PurgeFiles(ctx, now)` tiap jam: hapus berkas 30 hari setelah keputusan.
   - `authSvc.PurgeExpiredSessions(ctx, now.Add(-7*24*time.Hour))` dan
-    `authSvc.PurgeOTPChallenges(ctx, now.Add(-24*time.Hour))` tiap hari (cutoff OTP minimal 1 jam ke belakang
-    supaya rate limit tetap benar).
+    `authSvc.PurgeOTPChallenges(ctx, now.Add(-24*time.Hour))` tiap hari (cutoff OTP minimal 24 jam ke belakang
+    supaya plafon harian tetap benar).
 - CLI `api admin grant <phone>` / `api admin revoke <phone>`: panggil `auth.GrantAdmin(ctx, pool, phone)` /
   `auth.RevokeAdmin(ctx, pool, phone)`. Fungsi ini menulis `users.role` langsung (`UPDATE users SET role=$2
   WHERE phone=$1 RETURNING id`). Kalau `users` inti memakai soft delete atau `updated_at`, sesuaikan query di
@@ -186,8 +186,11 @@ Request `{"phone": "0812-3456-7890"}` (format bebas: `08…`, `62…`, `+62…`,
 ```
 `devCode` ikut hanya untuk provider `demo`/`echo`. Respons **sama** untuk nomor terdaftar dan belum terdaftar.
 
-Galat: 400 nomor tidak valid; 429 jeda kirim ulang 60 detik ("Tunggu N detik…"), > 5/jam per nomor, > 20/jam per
-IP; 502 `code:"otp_send_failed"` kalau gateway gagal (kuota tidak terpakai).
+Galat: 400 nomor tidak valid; 429 jeda kirim ulang 60 detik ("Tunggu N detik…"), > `OTP_MAX_PER_PHONE_HOUR`
+(default 5)/jam per nomor, > `OTP_MAX_PER_IP_HOUR` (default 200, NAT kampus)/jam per IP; 503 `code:"otp_daily_cap"`
+kalau plafon global `OTP_MAX_SENDS_PER_DAY` (default 2000 per hari WIB) tercapai, dengan `Retry-After` sampai
+00.00 WIB (lihat `docs/integration/ops.md` §2); 502 `code:"otp_send_failed"` kalau gateway gagal (kuota tidak
+terpakai).
 
 ### `POST /api/v1/auth/otp/verify`
 

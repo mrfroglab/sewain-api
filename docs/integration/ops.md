@@ -7,7 +7,7 @@ menjelaskan cara memasangnya.
 | Paket | Isi |
 |---|---|
 | `internal/platform/middleware` | Request ID, IP klien (proxy tepercaya), log akses JSON + masking PII, recover, batas body, timeout, header keamanan, CORS, `Chain` |
-| `internal/platform/ratelimit` | Interface `Limiter`, token bucket in-memory (`Memory`), profil `Public`/`Write`/`Upload`/`Auth`, middleware 429 |
+| `internal/platform/ratelimit` | Interface `Limiter`, token bucket in-memory (`Memory`), profil `Public`/`Write`/`Upload`/`Auth`/`Demo` (angka dari env `RATE_*`), middleware 429 |
 | `internal/platform/metrics` | Registry Prometheus privat, `Instrument` (label = pola rute `ServeMux`), gauge WebSocket, durasi job, antrean outbox, collector `pgxpool`, server `/metrics` |
 | `internal/platform/health` | `Live()` untuk `/api/health`, `Readiness{...}.Handler()` untuk `/api/ready`, variabel `Version`/`Commit` (diisi `-ldflags`) |
 | `internal/platform/server` | `Run(ctx, srv, opts)`: serve sampai ctx selesai, lalu shutdown rapi dengan batas waktu |
@@ -27,12 +27,13 @@ handler := middleware.Chain(m.Instrument(mux), // metrics: WAJIB paling dalam, l
     middleware.Recover(log),                    // 4. panic → 500 JSON; di dalam Logger supaya status 500 tercatat
     middleware.SecurityHeaders,                 // 5. nosniff, Referrer-Policy, CORP, no-store untuk JSON
     middleware.CORS(middleware.DefaultCORS(cfg.CORSOrigins)), // 6. preflight dijawab sebelum batas/rate limit
-    ratelimit.Middleware(limiter, ratelimit.Public, rlOpts),  // 7. batas kasar per IP untuk semua rute
-    middleware.BodyLimit(middleware.DefaultBodyLimit,         // 8. 1 MB default, 12 MB untuk unggahan
+    middleware.BodyLimit(middleware.DefaultBodyLimit,         // 7. 1 MB default, 12 MB untuk unggahan
         middleware.BodyRule{Method: "POST", Path: "/api/v1/photos", Limit: middleware.UploadBodyLimit},
         middleware.BodyRule{Method: "POST", Path: "/api/v1/kyc/submissions", Limit: middleware.UploadBodyLimit},
     ),
-    middleware.Timeout(cfg.RequestTimeout, middleware.TimeoutOptions{}), // 9. WebSocket otomatis dikecualikan
+    middleware.Timeout(cfg.RequestTimeout, middleware.TimeoutOptions{}), // 8. WebSocket otomatis dikecualikan
+    authSvc.Middleware,                                       // 9. viewer + middleware.SetUserID
+    ratelimit.Middleware(limiter, profiles.Public, rlOpts),   // 10. batas kasar semua rute: per user, tamu per IP
 )
 ```
 
@@ -91,23 +92,70 @@ sehingga rate limit per IP jadi global, jadi **wajib diisi di staging/produksi**
 
 ## 2. Profil rate limit
 
-Token bucket: `Burst` token maksimal, terisi `Limit` per menit. Nilai bawaan ada di `ratelimit.Public` dan
-lainnya; bisa disalin dan diubah per rute.
+Token bucket: `Burst` token maksimal, terisi `Limit` per menit. Semua angka dibaca dari env saat start
+(`internal/config` → `Config.Rates` → `httpapi.ProfilesFromRates`). Kosong atau `0` = default di bawah. Nilai yang
+bukan bilangan bulat 1–1.000.000 membuat proses **gagal start** dengan pesan yang menyebut nama variabelnya.
 
-| Profil | Batas | Burst | Key | Dipakai untuk |
-|---|---|---|---|---|
-| `auth` | 10/menit | 5 | IP | `POST /api/v1/auth/otp/request`, `POST /api/v1/auth/otp/verify`, `POST /api/v1/auth/demo-login` |
-| `upload` | 20/menit | 10 | user (tamu → IP) | `POST /api/v1/photos`, `POST /api/v1/photos/demo`, `POST /api/v1/kyc/submissions` |
-| `write` | 60/menit | 20 | user (tamu → IP) | `POST /api/v1/actions/{name}`, `POST/DELETE /api/v1/push/subscriptions`, `PUT /api/v1/me/notification-prefs`, `DELETE /api/v1/me`, `POST /api/v1/auth/logout`, `DELETE /api/v1/auth/sessions`, `POST /api/v1/admin/listings/import` |
-| `public` | 120/menit | 60 | IP | Global (semua rute), termasuk `GET /api/v1/state` (snapshot), `GET /api/v1/listings/search`, `GET /api/v1/photos/{id}`, `GET /api/v1/events` (handshake WebSocket) |
+| Profil | Default | Burst | Key | Env | Dipakai untuk |
+|---|---|---|---|---|---|
+| `public` | 1200/menit | 300 | user (tamu → IP) | `RATE_PUBLIC_PER_MIN`, `RATE_PUBLIC_BURST` | Global (semua rute), termasuk `GET /api/v1/state` (snapshot), `GET /api/v1/listings/search`, `GET /api/v1/photos/{id}`, `GET /api/v1/events` (handshake WebSocket) |
+| `write` | 120/menit | 40 | user (tamu → IP) | `RATE_WRITE_PER_MIN`, `RATE_WRITE_BURST` | `POST /api/v1/actions/{name}`, `POST/DELETE /api/v1/push/subscriptions`, `PUT /api/v1/me/notification-prefs`, `DELETE /api/v1/me`, `POST /api/v1/auth/logout`, `DELETE /api/v1/auth/sessions`, `POST /api/v1/admin/listings/import` |
+| `upload` | 30/menit | 10 | user (tamu → IP) | `RATE_UPLOAD_PER_MIN`, `RATE_UPLOAD_BURST` | `POST /api/v1/photos`, `POST /api/v1/photos/demo`, `POST /api/v1/kyc/submissions` |
+| `auth` | 60/menit | 20 | IP | `RATE_AUTH_PER_MIN`, `RATE_AUTH_BURST` | `POST /api/v1/auth/otp/request`, `POST /api/v1/auth/otp/verify` |
+| `demo` | 600/menit | 100 | IP | `RATE_DEMO_PER_MIN`, `RATE_DEMO_BURST` | `POST /api/v1/auth/demo-login` (hanya ada di `DEMO_MODE`) |
+
+### Kenapa angkanya segini: NAT kampus
+
+Wi-Fi kampus UGM keluar lewat **satu IP NAT** untuk ratusan sampai ribuan mahasiswa. Hari pertama pilot (booth
+pendaftaran, demo di kelas) semua lalu lintas datang dari satu IP. Batas lama (`public` 120/menit per IP, global)
+membuat satu kelas saja sudah kena 429. Uji regresi staging gagal karena hal yang sama: semua request datang dari
+satu mesin.
+
+- **`public` per user, bukan per IP.** Limiter global dipasang **setelah** `auth.Middleware`, sehingga mahasiswa
+  yang sudah masuk punya bucket sendiri. Tamu (dan token yang tidak valid) berbagi bucket IP. 1200/menit per IP
+  untuk tamu cukup untuk sekitar 300 pengunjung anonim yang membuka snapshot dan beberapa foto per menit. Satu IP
+  yang membanjiri tetap kena 429 setelah 300 request beruntun (lalu 20/detik).
+- **`write`/`upload` per user.** Pola wajar satu mahasiswa: 1 snapshot + 5 aksi + 3 foto per menit. Default
+  memberi ruang 4–24× pola itu, dan burst cukup untuk mengunggah semua foto checkout sekaligus.
+- **`auth` 60/menit, burst 20 per IP.** Booth pendaftaran bisa memproses puluhan nomor per menit dari satu IP.
+  Pertahanan biaya OTP yang sebenarnya ada di database (per nomor, per IP per jam, dan plafon harian global, lihat
+  di bawah), bukan di profil ini.
+- **`demo` terpisah dari `auth`.** Demo dan uji regresi login banyak persona dari satu mesin. Endpoint ini hanya
+  ada di `DEMO_MODE` (ditolak di produksi), jadi profilnya longgar.
+- Tes: `ratelimit.TestCampusNATNoFalsePositives` (300 user × 5 menit, jam palsu), `app.TestCampusNATDefaults`
+  (300 user lewat HTTP sungguhan dari satu IP), `TestSingleIPFloodStillLimited`, `TestDemoLoginNotThrottled`.
+
+### Batas OTP di database (paket `auth`)
+
+Dihitung dari `otp_challenges`, jadi berlaku lintas instance. Kode yang gagal dikirim gateway tidak dihitung.
+
+| Env | Default | Arti |
+|---|---|---|
+| `OTP_MAX_PER_PHONE_HOUR` | 5 | Kode per nomor per jam (ditambah jeda kirim ulang 60 detik) |
+| `OTP_MAX_PER_IP_HOUR` | 200 | Kode per IP (IPv6 per /64) per jam. Tinggi karena NAT kampus |
+| `OTP_MAX_SENDS_PER_DAY` | 2000 | Plafon **global** kode terkirim per hari kalender WIB (00.00–24.00 WIB) |
+
+Plafon harian adalah pertahanan utama terhadap SMS/WA pumping: tiap OTP berbayar (PRD §15.2), dan penyerang bisa
+memutar nomor serta IP. Saat plafon tercapai:
+
+- Request OTP dijawab `503` `{"ok":false,"code":"otp_daily_cap","error":"Maaf, pengiriman kode OTP hari ini sudah
+  mencapai batas. Coba lagi besok, ya. Kalau mendesak, hubungi admin Sewain."}` dengan `Retry-After` sampai
+  00.00 WIB. Sesi yang sudah ada tidak terpengaruh.
+- Penolakan pertama hari itu menulis log `WARN` `OTP daily send cap reached: ...` (field `day`, `cap`, `sent`).
+- Semua admin mendapat **satu** notifikasi in-app (jenis `keamanan`, ikut push/email) per hari. Dedup lintas
+  instance lewat tabel `otp_daily_cap_alerts` (migrasi `00102`). Kalau pengiriman notifikasi gagal, penolakan
+  berikutnya mencoba lagi.
+- Plafon tidak dikunci global (supaya OTP tidak antre di belakang panggilan gateway), jadi request yang berjalan
+  bersamaan bisa melewatinya sebanyak request yang sedang berjalan saat itu.
+- Kalau lalu lintasnya memang wajar (mis. hari peluncuran), naikkan `OTP_MAX_SENDS_PER_DAY` lalu restart.
 
 Catatan:
 
-- Rute yang punya profil khusus tetap kena `public` dari rantai global. Ini disengaja: `public` jadi batas atas
-  per IP.
+- Rute yang punya profil khusus tetap kena `public`. Ini disengaja: `public` jadi batas atas per user/IP.
+- Karena `public` berjalan setelah `auth.Middleware`, request dengan token palsu tetap memicu satu lookup sesi
+  (indeks hash) sebelum kena 429. Untuk pilot ini dapat diterima.
 - **Snapshot**: web me-refetch `GET /api/v1/state` setiap ada event WebSocket. Dengan `ETag` (core-v2) refetch
-  murah, tapi tetap terhitung. 120/menit per IP cukup untuk satu orang, tapi **NAT kampus** (banyak mahasiswa di
-  balik satu IP) bisa kena. Kalau terjadi di pilot, naikkan `public` atau ganti key snapshot ke `ByUser`.
+  murah, tapi tetap terhitung (per user).
 - **Events**: yang dibatasi hanya handshake. Pesan di koneksi yang sudah terbuka tidak dihitung.
 - **Healthcheck** dilayani dari `127.0.0.1` di dalam container. Kalau perlu, kecualikan dengan `KeyFunc` yang
   mengembalikan `""` untuk `/api/health`.
@@ -118,10 +166,25 @@ Catatan:
 - Hitung 429 di metrics:
   `rlOpts := ratelimit.Options{Log: log, OnLimited: func(p string, _ *http.Request) { m.RateLimited(p) }}`.
 
-> **Batas in-memory berlaku per instance.** Dengan N instance API, batas efektif menjadi N kali lipat, dan
-> restart mengosongkan semua bucket. Untuk pilot (1 instance, D11) ini cukup. Sebelum menjalankan lebih dari
-> satu instance, buat implementasi `ratelimit.Limiter` berbasis Redis atau Postgres. Interface-nya hanya
-> `Allow(ctx, key, rate) (Decision, error)`.
+> **Batas in-memory berlaku per instance.** Profil `RATE_*` dihitung di memori proses: dengan N instance API, batas
+> efektif menjadi N kali lipat, dan restart mengosongkan semua bucket. Untuk pilot (1 instance, D11) ini cukup.
+> Sebelum menjalankan lebih dari satu instance, bagi angkanya dengan jumlah instance atau buat implementasi
+> `ratelimit.Limiter` berbasis Redis/Postgres (interface-nya hanya `Allow(ctx, key, rate) (Decision, error)`).
+> Batas OTP (`OTP_MAX_*`) **tidak** terpengaruh: dihitung di database.
+
+### Keputusan worker `tune-limits`
+
+- `public` dipindah ke **setelah** `auth.Middleware` dan di-key per user (tamu per IP). Dengan key per IP murni,
+  300 mahasiswa × 9 request/menit = 2700 request/menit dari satu IP, jauh di atas 1200, jadi kriteria "NAT kampus
+  tanpa 429" mustahil dipenuhi. Banjir dari satu IP tamu tetap dibatasi di angka yang dikonfigurasi.
+- `demo-login` memakai profil sendiri (`demo`), bukan `auth`, supaya login demo tidak menghabiskan kuota OTP.
+- Plafon OTP harian ditolak dengan **503** + `code:"otp_daily_cap"` (bukan 429): yang habis kuota layanan, bukan
+  klien. Dihitung per hari kalender WIB (UTC+7 tetap) dari `otp_challenges` (indeks baru `created_at`).
+- Notifikasi admin lewat `service.NotifyAdmins` (berkas baru `internal/service/alerts.go`, hanya menambah fungsi)
+  yang memakai jalur `t.notify(domain.AdminID, …)`: in-app ke semua admin + outbox push/email. Jenis `keamanan`
+  supaya melewati jam tenang.
+- Purge OTP sekarang menolak cutoff < 24 jam (sebelumnya 1 jam), karena plafon harian membutuhkan baris hari ini.
+  Runner retensi sudah memakai 24 jam.
 
 ## 3. Env baru
 
