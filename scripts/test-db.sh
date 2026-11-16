@@ -35,7 +35,7 @@ up)
     docker rm -f "$NAME" >/dev/null 2>&1 || true
     docker run -d --name "$NAME" \
       -e POSTGRES_USER=sewain -e POSTGRES_PASSWORD=test -e POSTGRES_DB=sewain \
-      -p 127.0.0.1::5432 --tmpfs /var/lib/postgresql/data:rw --memory 512m \
+      -p 127.0.0.1::5432 --tmpfs /var/lib/postgresql/data:rw --memory 1g \
       --label sewain.test=1 "$IMAGE" >/dev/null
   fi
   wait_ready
