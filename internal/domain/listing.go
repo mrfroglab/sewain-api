@@ -3,19 +3,99 @@ package domain
 import (
 	"fmt"
 	"strings"
+	"unicode"
 )
 
-// BannedWordsIn: keyword filter for listings (FR-L4), whole-word, case-insensitive.
+// BannedWordsIn: keyword filter for listings (FR-L4), whole-word, case-insensitive. Text and keywords are folded the
+// same way (foldKeywordRune: full-width forms, accents, Cyrillic/Greek look-alikes). The text is read twice: split
+// at every non-letter/digit (the plain whole-word match), and compacted (punctuation and invisible characters inside
+// a word removed, runs of single spaced letters joined), so "A.I.R.S.O.F.T", "air-soft", "a i r s o f t" or a
+// zero-width space do not hide a keyword, while words that merely contain it ("airy software") still pass.
 func BannedWordsIn(text string, banned []string) []string {
-	norm := " " + strings.Join(strings.FieldsFunc(strings.ToLower(text), func(r rune) bool { return (r < 'a' || r > 'z') && (r < '0' || r > '9') }), " ") + " "
+	folded := foldKeywordText(text)
+	plain := " " + strings.Join(alnumWords(folded), " ") + " "
+	compact := " " + strings.Join(compactWords(folded), " ") + " "
 	var out []string
-	for _, w := range banned {
-		w = strings.ToLower(strings.TrimSpace(w))
-		if w != "" && strings.Contains(norm, " "+w+" ") {
-			out = append(out, w)
+	for _, b := range banned {
+		words := alnumWords(foldKeywordText(b))
+		if len(words) == 0 {
+			continue
+		}
+		phrase, glued := " "+strings.Join(words, " ")+" ", " "+strings.Join(words, "")+" "
+		if strings.Contains(plain, phrase) || strings.Contains(compact, phrase) || strings.Contains(compact, glued) {
+			out = append(out, strings.ToLower(strings.TrimSpace(b)))
 		}
 	}
 	return out
+}
+
+func isKeywordRune(r rune) bool { return (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') }
+
+func alnumWords(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool { return !isKeywordRune(r) })
+}
+
+// compactWords drops everything but letters, digits and spaces, then joins runs of one-letter words.
+func compactWords(s string) []string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case isKeywordRune(r):
+			b.WriteRune(r)
+		case unicode.IsSpace(r):
+			b.WriteByte(' ')
+		}
+	}
+	var out []string
+	run := ""
+	for _, w := range strings.Fields(b.String()) {
+		if len(w) == 1 {
+			run += w
+			continue
+		}
+		if run != "" {
+			out, run = append(out, run), ""
+		}
+		out = append(out, w)
+	}
+	if run != "" {
+		out = append(out, run)
+	}
+	return out
+}
+
+func foldKeywordText(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		b.WriteRune(foldKeywordRune(r))
+	}
+	return b.String()
+}
+
+// keywordFold maps accented Latin letters and Cyrillic/Greek look-alikes (lower case) to ASCII.
+var keywordFold = func() map[rune]rune {
+	m := map[rune]rune{}
+	for to, from := range map[rune]string{
+		'a': "àáâãäåāăąǎạảấầẩẫậắằẳẵặаα", 'b': "вβ", 'c': "çćĉċčс", 'd': "ďđ", 'e': "èéêëēĕėęěẹẻẽếềểễệеεё",
+		'g': "ĝğġģ", 'h': "ĥħн", 'i': "ìíîïĩīĭįıǐỉịіїι", 'j': "ĵј", 'k': "ķкκ", 'l': "ĺļľŀł", 'm': "м",
+		'n': "ñńņňŉη", 'o': "òóôõöøōŏőǒọỏốồổỗộớờởỡợоο", 'p': "рρ", 'r': "ŕŗř", 's': "śŝşšѕ", 't': "ţťŧтτ",
+		'u': "ùúûüũūŭůűųǔưụủứừửữựυ", 'v': "ν", 'w': "ŵ", 'x': "хχ", 'y': "ýÿŷỳỵỷỹу", 'z': "źżž",
+	} {
+		for _, r := range from {
+			m[r] = to
+		}
+	}
+	return m
+}()
+
+func foldKeywordRune(r rune) rune {
+	if r >= 0xFF01 && r <= 0xFF5E { // full-width ASCII
+		r = unicode.ToLower(r - 0xFEE0)
+	}
+	if to, ok := keywordFold[r]; ok {
+		return to
+	}
+	return r
 }
 
 // ApplyListing merges a create/update payload into a listing (same semantics as the web store).
@@ -92,7 +172,7 @@ func ValidateListing(l *Listing, banned []string) error {
 	if err := validateListingBounds(l); err != nil {
 		return err
 	}
-	if words := BannedWordsIn(l.Title+" "+l.Description, banned); len(words) > 0 {
+	if words := BannedWordsIn(strings.Join([]string{l.Title, l.Description, l.ConditionNotes, Deref(l.Rules.Special, "")}, "\n"), banned); len(words) > 0 {
 		return Fail("Ada kata yang dilarang: " + strings.Join(words, ", ") + ".")
 	}
 	return nil
