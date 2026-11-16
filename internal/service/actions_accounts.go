@@ -20,6 +20,10 @@ func (t *txn) registerUser(in domain.RegisterInput, wantID string) (domain.ID, e
 	if strings.TrimSpace(in.Name) == "" {
 		return "", domain.Fail("Nama wajib diisi.")
 	}
+	if err := domain.FirstErr(domain.CheckLen("Nama", strings.TrimSpace(in.Name), domain.MaxNameLen), checkStore(in.Store),
+		domain.CheckLenPtr("Email", in.Email, maxEmailLen)); err != nil {
+		return "", err
+	}
 	taken, err := t.q.PhoneTaken(t.ctx, phone)
 	t.check(err)
 	if taken {
@@ -67,6 +71,9 @@ func (t *txn) insertUser(u *domain.User) error {
 }
 
 func (t *txn) updateUser(userID domain.ID, p domain.UserPatch) error {
+	if err := checkUserPatch(p); err != nil {
+		return err
+	}
 	u := t.userForUpdate(userID)
 	if u == nil {
 		return domain.Fail("Akun tidak ditemukan.")
@@ -124,6 +131,9 @@ func (t *txn) submitVerification(userID domain.ID, in domain.VerificationInput, 
 	if u == nil {
 		return "", domain.Fail("Akun tidak ditemukan.")
 	}
+	if err := domain.CheckLen("Nama di KTP", in.NameOnKtp, domain.MaxNameLen); err != nil {
+		return "", err
+	}
 	nik := domain.Digits(in.Nik)
 	masked := domain.MaskNik(nik)
 	if len(nik) >= 8 {
@@ -158,6 +168,12 @@ func (t *txn) reviewVerification(adminID, requestID domain.ID, approve bool, rea
 		return domain.Fail("Pengajuan tidak ditemukan.")
 	}
 	req := verificationFromRow(r)
+	if req.Status != "menunggu" {
+		return domain.Fail("Pengajuan ini sudah diputuskan (" + req.Status + ").")
+	}
+	if err := domain.CheckLenPtr("Alasan", reason, domain.MaxReasonLen); err != nil {
+		return err
+	}
 	req.Status, req.ReviewedAt, req.ReviewedBy, req.Reason = "ditolak", domain.Ptr(t.now), domain.Ptr(adminID), reason
 	if approve {
 		req.Status = "disetujui"
@@ -183,4 +199,37 @@ func (t *txn) reviewVerification(adminID, requestID domain.ID, approve bool, rea
 		t.audit(adminID, action, domain.PublicName(u), nil, reason)
 	}
 	return nil
+}
+
+// maxEmailLen is the longest valid e-mail address (RFC 5321 path limit).
+const maxEmailLen = 254
+
+// checkUserPatch bounds the profile texts (review wave 2, L2).
+func checkUserPatch(p domain.UserPatch) error {
+	trim := func(s *string) *string {
+		if s == nil {
+			return nil
+		}
+		return domain.Ptr(strings.TrimSpace(*s))
+	}
+	return domain.FirstErr(
+		domain.CheckLenPtr("Nama", trim(p.Name), domain.MaxNameLen),
+		domain.CheckLenPtr("Nama panggilan", p.Nickname, domain.MaxNameLen),
+		domain.CheckLenPtr("Email", p.Email, maxEmailLen),
+		domain.CheckLenPtr("Bio", p.Bio, domain.MaxBioLen),
+		domain.CheckLenPtr("Kampus", p.Campus, domain.MaxShortLen),
+		checkStore(p.Store),
+	)
+}
+
+// checkStore bounds the shop profile.
+func checkStore(st *domain.StoreInfo) error {
+	if st == nil {
+		return nil
+	}
+	return domain.FirstErr(
+		domain.CheckLen("Nama toko", strings.TrimSpace(st.Name), domain.MaxNameLen),
+		domain.CheckLen("Jam buka toko", st.Hours, domain.MaxShortLen),
+		domain.CheckLenPtr("NIB", st.NIB, 32),
+	)
 }

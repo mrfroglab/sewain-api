@@ -88,6 +88,9 @@ func (s *Service) CreateUser(ctx context.Context, tx pgx.Tx, phone, name string)
 	if strings.TrimSpace(name) == "" {
 		return nil, Change{}, domain.Fail("Nama wajib diisi.")
 	}
+	if err := domain.CheckLen("Nama", strings.TrimSpace(name), domain.MaxNameLen); err != nil {
+		return nil, Change{}, err
+	}
 	u := &domain.User{ID: domain.NewID("u"), Name: strings.TrimSpace(name), Phone: phone, Role: "user", AccountType: "individu",
 		Verification: domain.Verification{Status: "belum"}, AreaID: "ugm", JoinedAt: t.now, Status: "aktif"}
 	if err := t.insertUser(u); err != nil {

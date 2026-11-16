@@ -58,6 +58,13 @@ func ApplyCommissionPatch(c CommissionConfig, p CommissionPatch) (CommissionConf
 	if c.Percent < 0 || c.Percent > 100 || c.Flat < 0 || c.SplitRenterPercent < 0 || c.SplitRenterPercent > 100 {
 		return c, Fail("Nilai komisi tidak valid.")
 	}
+	money := func(p *int64) bool { return p == nil || (*p >= 0 && *p <= MaxRupiah) }
+	switch {
+	case c.Flat > MaxRupiah || !money(c.Min) || !money(c.Max):
+		return c, Fail("Nominal komisi tidak boleh negatif atau melebihi " + Rupiah(MaxRupiah) + ".")
+	case c.Min != nil && c.Max != nil && *c.Min > *c.Max:
+		return c, Fail("Komisi minimum tidak boleh lebih besar dari maksimum.")
+	}
 	return c, nil
 }
 
