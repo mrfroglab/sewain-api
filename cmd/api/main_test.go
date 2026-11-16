@@ -135,3 +135,39 @@ func TestServeOnV1Database(t *testing.T) {
 	pool.Close()
 	startAndCheck(t, url)
 }
+
+func TestCLIVapidAndAdmin(t *testing.T) {
+	var out strings.Builder
+	if err := cli([]string{"vapid", "gen"}, &out, discard()); err != nil || !strings.Contains(out.String(), "VAPID_PUBLIC_KEY=B") ||
+		!strings.Contains(out.String(), "VAPID_PRIVATE_KEY=") {
+		t.Fatalf("vapid gen: %v %q", err, out.String())
+	}
+	url := dbtest.NewDB(t)
+	t.Setenv("DATABASE_URL", url)
+	if err := cli([]string{"migrate"}, io.Discard, discard()); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := db.Open(context.Background(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	_, err = pool.Exec(context.Background(), `INSERT INTO users (id, phone, name, area_id, joined_at) VALUES ('u-janu', '081234560000', 'Janu', 'ugm', now())`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cli([]string{"admin", "grant", "+62 812-3456-0000"}, io.Discard, discard()); err != nil {
+		t.Fatal(err)
+	}
+	var role string
+	_ = pool.QueryRow(context.Background(), `SELECT role FROM users WHERE id = 'u-janu'`).Scan(&role)
+	if role != "admin" {
+		t.Fatalf("grant: %s", role)
+	}
+	if err := cli([]string{"admin", "revoke", "081234560000"}, io.Discard, discard()); err != nil {
+		t.Fatal(err)
+	}
+	if err := cli([]string{"admin", "grant", "081299999999"}, io.Discard, discard()); err == nil {
+		t.Fatal("unknown phone must fail")
+	}
+}

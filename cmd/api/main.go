@@ -34,6 +34,8 @@ import (
 
 func main() {
 	log := middleware.NewLogger(os.Stdout, middleware.ParseLevel(os.Getenv("LOG_LEVEL")))
+	// Packages that use the standard log package (auth, kyc) go through the same redacting JSON handler (review I2).
+	slog.SetDefault(log)
 	if err := cli(os.Args[1:], os.Stdout, log); err != nil {
 		log.Error("fatal", "err", err)
 		os.Exit(1)
