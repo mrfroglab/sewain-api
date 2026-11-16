@@ -30,6 +30,12 @@ func (t *txn) openDispute(actor, bookingID domain.ID, in domain.DisputeInput, wa
 	if in.PhotoIDs == nil {
 		in.PhotoIDs = []domain.ID{}
 	}
+	if !t.photosExist(in.PhotoIDs) {
+		return "", domain.Fail("Ada foto yang belum terunggah ke server. Coba lagi.")
+	}
+	if !t.evidenceOf(b, actor, in.PhotoIDs) {
+		return "", domain.Fail("Foto bukti harus diunggah untuk booking ini.")
+	}
 	id := t.pickID(wantID, "d", t.q.DisputeExists)
 	t.check(t.q.InsertDispute(t.ctx, dbq.InsertDisputeParams{ID: id, BookingID: bookingID, OpenedBy: actor, CaseType: in.CaseType,
 		Description: strings.TrimSpace(in.Description), Layer: "L1", Status: "negosiasi", L1Deadline: tsOf(t.now + domain.NegotiationTTL), CreatedAt: tsOf(t.now)}))

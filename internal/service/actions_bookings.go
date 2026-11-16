@@ -234,8 +234,10 @@ func (t *txn) submitCheckout(actor, id domain.ID, in domain.CheckoutInput) error
 	if len(in.CollateralPhotoIDs) < 1 {
 		return domain.Fail("Foto jaminan wajib (FR-J5).")
 	}
-	if !t.photosExist(append(append([]domain.ID{}, in.PhotoIDs...), in.CollateralPhotoIDs...)) {
+	if all := append(append([]domain.ID{}, in.PhotoIDs...), in.CollateralPhotoIDs...); !t.photosExist(all) {
 		return domain.Fail("Ada foto yang belum terunggah ke server. Coba lagi.")
+	} else if !t.evidenceOf(b, actor, all) {
+		return domain.Fail("Foto bukti harus diunggah untuk booking ini.")
 	}
 	l := t.listing(b.ListingID)
 	if l != nil && domain.IsVehicle(l.Category) && (domain.Deref(in.Odometer, "") == "" || domain.Deref(in.Fuel, "") == "") {
@@ -258,6 +260,9 @@ func (t *txn) addCheckoutPhotos(actor, id domain.ID, photoIDs []domain.ID) error
 	}
 	if !t.photosExist(photoIDs) {
 		return domain.Fail("Ada foto yang belum terunggah ke server. Coba lagi.")
+	}
+	if !t.evidenceOf(b, actor, photoIDs) {
+		return domain.Fail("Foto bukti harus diunggah untuk booking ini.")
 	}
 	b.Checkout.PhotoIDs = append(b.Checkout.PhotoIDs, photoIDs...)
 	b.Checkout.RenterAgreedAt = nil
@@ -335,6 +340,9 @@ func (t *txn) submitCheckin(actor, id domain.ID, in domain.CheckinInput) error {
 	all := append(append([]domain.ID{}, in.PhotoIDs...), in.ProblemPhotoIDs...)
 	if !t.photosExist(all) {
 		return domain.Fail("Ada foto yang belum terunggah ke server. Coba lagi.")
+	}
+	if !t.evidenceOf(b, actor, all) {
+		return domain.Fail("Foto bukti harus diunggah untuk booking ini.")
 	}
 	b.Status, b.ReturnedAt = "RETURNED", domain.Ptr(t.now)
 	b.Checkin = &domain.Checkin{PhotoIDs: all, Result: in.Result, ProblemType: in.ProblemType, ProblemNote: in.ProblemNote, Odometer: in.Odometer, Fuel: in.Fuel, At: t.now}
@@ -454,6 +462,9 @@ func (t *txn) sendMessage(senderID, id domain.ID, text *string, photoID *domain.
 	}
 	if photoID != nil && !t.photosExist([]domain.ID{*photoID}) {
 		return domain.Fail("Foto belum terunggah ke server. Coba lagi.")
+	}
+	if photoID != nil && !t.evidenceOf(b, senderID, []domain.ID{*photoID}) {
+		return domain.Fail("Foto bukti harus diunggah untuk booking ini.")
 	}
 	var txt *string
 	if clean != "" {
