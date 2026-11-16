@@ -380,14 +380,19 @@ func (t *txn) confirmCollateral(renterID, id domain.ID) error {
 	if b.CollateralReturn == nil || b.CollateralReturn.ProviderReturnedAt == nil {
 		return domain.Fail("Penyedia belum menandai jaminan dikembalikan.")
 	}
+	if b.CollateralReturn.RenterConfirmedAt != nil {
+		return domain.Fail("Jaminan sudah dikonfirmasi.")
+	}
 	completes := b.Status == "RETURNED"
 	b.CollateralReturn.RenterConfirmedAt = domain.Ptr(t.now)
 	if completes {
 		b.Status, b.CompletedAt = "COMPLETED", domain.Ptr(t.now)
 	}
 	t.saveBooking(b)
-	t.check(t.q.IncrementListingRentCount(t.ctx, b.ListingID))
-	t.touchPublic()
+	if completes { // a completed rental counts once (the auto-complete job counts the others)
+		t.check(t.q.IncrementListingRentCount(t.ctx, b.ListingID))
+		t.touchPublic()
+	}
 	title, body, msg := "Jaminan diterima penyewa", t.titleOf(b)+": penyewa mengonfirmasi jaminan sudah diterima.", "Penyewa mengonfirmasi jaminan diterima."
 	if completes {
 		title, body, msg = "Sewa selesai", body+" Beri rating, yuk.", "Penyewa mengonfirmasi jaminan diterima. Sewa SELESAI. Silakan saling memberi rating."
