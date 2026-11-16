@@ -330,7 +330,7 @@ func parseJPEG(data []byte) ([]jpegSegment, int, error) {
 				if i+1 >= len(data) {
 					return nil, 0, errFormat
 				}
-				if data[i] == 0xFF && data[i+1] != 0x00 && !(data[i+1] >= 0xD0 && data[i+1] <= 0xD7) && data[i+1] != 0xFF {
+				if data[i] == 0xFF && data[i+1] != 0x00 && (data[i+1] < 0xD0 || data[i+1] > 0xD7) && data[i+1] != 0xFF {
 					break
 				}
 				i++

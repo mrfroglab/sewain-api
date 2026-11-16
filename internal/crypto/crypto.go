@@ -112,9 +112,12 @@ func (kr *KeyRing) Seal(plaintext, aad []byte) ([]byte, error) {
 		return nil, errors.New("crypto: no active key")
 	}
 	id := kr.active
+	if len(id) == 0 || len(id) > 255 { // Add/validKeyID keep it at 1–32; the header stores the length in one byte
+		return nil, errors.New("crypto: invalid active key id")
+	}
 	header := make([]byte, 0, len(magic)+2+len(id)+nonceSize)
 	header = append(header, magic...)
-	header = append(header, version1, byte(len(id)))
+	header = append(header, version1, byte(len(id))) // #nosec G115 -- 1 ≤ len(id) ≤ 255 checked above
 	header = append(header, id...)
 	nonce := make([]byte, nonceSize)
 	if _, err := rand.Read(nonce); err != nil {
@@ -248,7 +251,7 @@ func validKeyID(id string) bool {
 		return false
 	}
 	for _, r := range id {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' && r != '-' {
 			return false
 		}
 	}
