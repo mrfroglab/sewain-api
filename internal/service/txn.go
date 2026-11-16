@@ -251,10 +251,24 @@ func (t *txn) insertBooking(b *domain.Booking) {
 	t.touch(b.RenterID, b.ProviderID)
 }
 
+// saveBooking writes a booking and records who must refresh: both parties, and everyone (public) when the status
+// moves into or out of a state that shows on public data: the busy dates of the listing (listingBusy: ACCEPTED,
+// ACTIVE, DISPUTED) and the public reputation (publicStats: completed rentals, disputes).
 func (t *txn) saveBooking(b *domain.Booking) {
+	var old string
+	err := t.tx.QueryRow(t.ctx, `SELECT status FROM bookings WHERE id = $1`, b.ID).Scan(&old)
+	if !t.found(err) && t.err != nil {
+		return
+	}
 	t.check(t.q.UpdateBooking(t.ctx, updateBookingParams(b)))
 	t.touch(b.RenterID, b.ProviderID)
+	if old != b.Status && (publicBookingStatus[old] || publicBookingStatus[b.Status]) {
+		t.touchPublic()
+	}
 }
+
+// publicBookingStatus: booking states that appear in public snapshot data (listingBusy, publicStats).
+var publicBookingStatus = map[string]bool{"ACCEPTED": true, "ACTIVE": true, "DISPUTED": true, "COMPLETED": true}
 
 // partyBooking locks a booking the actor is a party of (role: renter | provider | any).
 func (t *txn) partyBooking(actor, id domain.ID, role string) (*domain.Booking, error) {

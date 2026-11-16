@@ -100,6 +100,47 @@ func TestSingleIPFloodStillLimited(t *testing.T) {
 	}
 }
 
+// TestFakeTokenFloodStopsBeforeAuth (review wave 2, L6): one IP sending made-up session cookies and bearer tokens is
+// cut off by the per-IP brake before the auth middleware looks the session up. A request that reaches auth with a
+// bad cookie gets a Set-Cookie clearing it; the refused ones never do. Signed-in users on other IPs are unaffected.
+func TestFakeTokenFloodStopsBeforeAuth(t *testing.T) {
+	a := apptest.New(t, apptest.Options{RealRateLimits: true, Env: map[string]string{"RATE_IP_PER_MIN": "60", "RATE_IP_BURST": "20",
+		"TRUSTED_PROXY_CIDRS": "127.0.0.1/32,::1/128"}})
+	flood := func(i int) apptest.Resp {
+		s := &apptest.Session{Cookie: fmt.Sprintf("palsu-%d", i)}
+		if i%2 == 1 {
+			s = &apptest.Session{Token: fmt.Sprintf("palsu-%d", i)}
+		}
+		return a.Do(s, apptest.Req{Method: "GET", Path: "/api/v1/state", Headers: map[string]string{"CF-Connecting-IP": "203.0.113.9"}})
+	}
+	reachedAuth, limited := 0, 0
+	for i := range 60 {
+		r := flood(i)
+		switch r.Status {
+		case http.StatusTooManyRequests:
+			limited++
+			if r.Header.Get("Set-Cookie") != "" {
+				t.Fatalf("request %d was refused after the session lookup: %v", i, r.Header)
+			}
+		case http.StatusOK:
+			if i%2 == 0 && !strings.HasPrefix(r.Header.Get("Set-Cookie"), "sewain_session=;") {
+				t.Fatalf("request %d with a fake cookie did not reach auth: %v", i, r.Header)
+			}
+			reachedAuth++
+		default:
+			t.Fatalf("request %d: %d %s", i, r.Status, r.Raw)
+		}
+	}
+	if reachedAuth > 21 || limited < 39 { // burst 20 (+1 refilled while the loop runs)
+		t.Fatalf("reached auth %d, limited %d", reachedAuth, limited)
+	}
+	// A student on another address still gets in.
+	s := newStudents(t, a, 1)[0]
+	if r := a.Do(s, apptest.Req{Method: "GET", Path: "/api/v1/state", Headers: map[string]string{"CF-Connecting-IP": "203.0.113.10"}}); r.Status != 200 {
+		t.Fatalf("other IP: %d %s", r.Status, r.Raw)
+	}
+}
+
 // TestDemoLoginNotThrottled: DEMO_MODE persona logins use the generous demo profile, not auth: 50 logins a minute
 // from one IP all succeed and leave the OTP (auth) bucket untouched.
 func TestDemoLoginNotThrottled(t *testing.T) {

@@ -219,7 +219,7 @@ func New(cfg config.Config, pool *pgxpool.Pool, log *slog.Logger, opt Options) (
 func rateProfiles(cfg config.Config, override httpapi.RateProfiles) httpapi.RateProfiles {
 	p := httpapi.ProfilesFromRates(cfg.Rates)
 	for _, o := range []struct{ dst, src *ratelimit.Profile }{
-		{&p.Public, &override.Public}, {&p.Write, &override.Write}, {&p.Upload, &override.Upload},
+		{&p.IP, &override.IP}, {&p.Public, &override.Public}, {&p.Write, &override.Write}, {&p.Upload, &override.Upload},
 		{&p.Auth, &override.Auth}, {&p.Demo, &override.Demo},
 	} {
 		if o.src.Name != "" {

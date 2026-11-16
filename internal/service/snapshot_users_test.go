@@ -12,8 +12,10 @@ import (
 // user nothing points at. Admins still get everyone.
 func TestSnapshotUsersReferenced(t *testing.T) {
 	e := newEnv(t)
-	all := scopedService(t, e)
-	ref := service.New(e.svc.Pool(), service.Options{DemoMode: true, SnapshotScope: service.ScopeScoped,
+	all := service.New(e.svc.Pool(), service.Options{DemoMode: true, SnapshotScope: service.ScopeScoped,
+		SnapshotUsers: service.SnapshotUsersAll, Now: e.clock.Now})
+	// Outside DEMO_MODE: exactly the referenced profiles (the demo personas are added only in DEMO_MODE).
+	ref := service.New(e.svc.Pool(), service.Options{DemoMode: false, SnapshotScope: service.ScopeScoped,
 		SnapshotUsers: service.SnapshotUsersReferenced, Now: e.clock.Now})
 
 	// A registered user with no listings, bookings or reviews: nobody refers to them.
@@ -103,5 +105,43 @@ func TestSnapshotUsersReferenced(t *testing.T) {
 	a, _ := all.Snapshot(e.ctx, e.viewer(domain.AdminID))
 	if len(admin.Users) != len(a.Users) {
 		t.Errorf("admin: %d users, want all %d", len(admin.Users), len(a.Users))
+	}
+}
+
+// TestSnapshotUsersDemoPersonas (default SNAPSHOT_USERS=referenced): in DEMO_MODE guests and users still get every
+// demo persona (the persona picker and Demo panel need them), but not other unreferenced accounts.
+func TestSnapshotUsersDemoPersonas(t *testing.T) {
+	e := newEnv(t)
+	svc := service.New(e.svc.Pool(), service.Options{DemoMode: true, SnapshotScope: service.ScopeScoped, Now: e.clock.Now}) // default users scope
+	loner, err := e.svc.Dispatch(e.ctx, nil, "registerUser", args(domain.RegisterInput{Name: "Penyendiri", Phone: "089600000002", AreaID: "ugm"}), "u-loner2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var personas []string
+	for _, u := range e.state().Users {
+		if u.Demo != nil {
+			personas = append(personas, u.ID)
+		}
+	}
+	if len(personas) < 5 {
+		t.Fatalf("seed personas: %v", personas)
+	}
+	for _, v := range []*service.Viewer{nil, e.viewer("u-bima")} {
+		snap, err := svc.Snapshot(e.ctx, v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]*domain.User{}
+		for _, u := range snap.Users {
+			got[u.ID] = u
+		}
+		for _, id := range personas {
+			if got[id] == nil || got[id].Demo == nil {
+				t.Errorf("viewer %v: persona %s missing (or without demo)", v, id)
+			}
+		}
+		if got[loner.Value.(domain.ID)] != nil {
+			t.Errorf("viewer %v: unreferenced non-demo account visible", v)
+		}
 	}
 }

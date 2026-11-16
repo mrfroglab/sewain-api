@@ -20,6 +20,8 @@ import (
 type Snapshot struct {
 	*domain.Data
 	ServerNow int64 `json:"serverNow"`
+	// ViewerVersion is the latest change relevant to this viewer (see ETag); not sent.
+	ViewerVersion int64 `json:"-"`
 }
 
 // SnapshotScope returns the effective scope (full is only honored in DEMO_MODE).
@@ -30,12 +32,34 @@ func (s *Service) SnapshotScope() string {
 	return ScopeScoped
 }
 
-// ETag identifies a snapshot without building it: the state version, the clock offset and who is looking.
+// viewerVersionSQL is the latest change_log version relevant to a viewer: every change for admins and scope "full"
+// ($1), otherwise public changes plus the ones naming the user ($2, ” for guests). Every write that changes what a
+// viewer sees touches that viewer or marks the change public (txn.touch/touchPublic), which is what the realtime
+// feed relies on too. When the viewer's rows were pruned (Housekeeping) the oldest kept version stands in: it only
+// grows, so an ETag never comes back to an older value after something changed.
+const viewerVersionSQL = `coalesce(
+	(SELECT max(version) FROM change_log WHERE $1::boolean OR public OR ($2::text <> '' AND $2::text = ANY(users))),
+	(SELECT min(version) FROM change_log), 0)`
+
+func (s *Service) seesEverything(viewer *Viewer) bool {
+	return viewer.IsAdmin() || s.SnapshotScope() == ScopeFull
+}
+
+func viewerKey(viewer *Viewer) string {
+	if viewer == nil {
+		return ""
+	}
+	return viewer.UserID
+}
+
+// ETag identifies a snapshot without building it: the latest change relevant to the viewer, the clock offset and
+// who is looking. A change that only concerns other users (their bookings, chats, notifications) keeps the ETag, so
+// a refetch gets 304 (load test finding 7.2: the global version gave 0% 304s).
 func (s *Service) ETag(ctx context.Context, viewer *Viewer) (string, int64, error) {
 	var version int64
 	var clock json.RawMessage
-	err := s.pool.QueryRow(ctx, `SELECT coalesce((SELECT max(version) FROM change_log), 0),
-		coalesce((SELECT value FROM app_settings WHERE key = 'clock'), '{}'::jsonb)`).Scan(&version, &clock)
+	err := s.pool.QueryRow(ctx, `SELECT `+viewerVersionSQL+`,
+		coalesce((SELECT value FROM app_settings WHERE key = 'clock'), '{}'::jsonb)`, s.seesEverything(viewer), viewerKey(viewer)).Scan(&version, &clock)
 	if err != nil {
 		return "", 0, err
 	}
@@ -44,7 +68,7 @@ func (s *Service) ETag(ctx context.Context, viewer *Viewer) (string, int64, erro
 	return s.ETagFor(viewer, version, c.OffsetMs), version, nil
 }
 
-// ETagFor is the ETag of a snapshot with this version and clock offset for this viewer.
+// ETagFor is the ETag of a snapshot with this viewer version (Snapshot.ViewerVersion) and clock offset for this viewer.
 func (s *Service) ETagFor(viewer *Viewer, version, clockOffset int64) string {
 	who := "guest"
 	if viewer != nil {
@@ -102,6 +126,8 @@ func (s *Service) buildSnapshot(ctx context.Context, tx pgx.Tx, viewer *Viewer, 
 	version, err := q.CurrentVersion(ctx)
 	r.ok(err)
 	d.Version = version
+	var viewerVersion int64
+	r.ok(tx.QueryRow(ctx, `SELECT `+viewerVersionSQL, s.seesEverything(viewer), viewerKey(viewer)).Scan(&viewerVersion))
 	clock, err := getSetting[clockSetting](ctx, q, "clock")
 	r.ok(err)
 	seedInfo, err := getSetting[seedSetting](ctx, q, "seed")
@@ -210,15 +236,25 @@ func (s *Service) buildSnapshot(ctx context.Context, tx pgx.Tx, viewer *Viewer, 
 	// Users last: with SNAPSHOT_USERS=referenced a scoped snapshot only carries the profiles the rest of it points
 	// at, which keeps its size and cost independent of the number of accounts.
 	var ids []string
-	if !all && s.opt.SnapshotUsers == SnapshotUsersReferenced {
+	if !all && s.opt.SnapshotUsers != SnapshotUsersAll {
 		ids = referencedUsers(d, me)
+		if s.opt.DemoMode {
+			// The persona picker and the Demo panel list every demo account, referenced or not.
+			rows, err := tx.Query(ctx, `SELECT id FROM users WHERE demo IS NOT NULL AND deleted_at IS NULL`)
+			if r.ok(err) {
+				demo, err := pgx.CollectRows(rows, pgx.RowTo[string])
+				if r.ok(err) {
+					ids = mergeIDs(ids, demo)
+				}
+			}
+		}
 	}
 	s.loadUsers(r, d, all, me, now, ids)
 	if r.err != nil {
 		return nil, r.err
 	}
 	domain.Normalize(d)
-	return &Snapshot{Data: d, ServerNow: s.realNow()}, nil
+	return &Snapshot{Data: d, ServerNow: s.realNow(), ViewerVersion: viewerVersion}, nil
 }
 
 // publicProfile keeps what anyone may see (ROADMAP §4): no phone, e-mail, NIK, strikes or verification details.
@@ -301,6 +337,20 @@ func referencedUsers(d *domain.Data, me string) []string {
 	}
 	for _, v := range d.Verifications {
 		add(v.UserID)
+	}
+	out := make([]string, 0, len(set))
+	for id := range set {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// mergeIDs returns the sorted union of two id lists.
+func mergeIDs(a, b []string) []string {
+	set := make(map[string]bool, len(a)+len(b))
+	for _, id := range append(append([]string{}, a...), b...) {
+		set[id] = true
 	}
 	out := make([]string, 0, len(set))
 	for id := range set {

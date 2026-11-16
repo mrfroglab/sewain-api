@@ -880,6 +880,49 @@ func (q *Queries) ListReviewsVisibleTo(ctx context.Context, viewer *string) ([]R
 	return items, nil
 }
 
+const listVisibleReviewsAbout = `-- name: ListVisibleReviewsAbout :many
+SELECT id, ord, booking_id, listing_id, from_id, to_id, from_role, rating, comment, created_at, visible_at, released FROM reviews WHERE to_id = $1 AND (released OR visible_at <= $2::timestamptz) ORDER BY ord
+`
+
+type ListVisibleReviewsAboutParams struct {
+	ToID string
+	Now  time.Time
+}
+
+// Public profile page: reviews about a user that are shown (released, or past visible_at, FR-T2).
+func (q *Queries) ListVisibleReviewsAbout(ctx context.Context, arg ListVisibleReviewsAboutParams) ([]Review, error) {
+	rows, err := q.db.Query(ctx, listVisibleReviewsAbout, arg.ToID, arg.Now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Review{}
+	for rows.Next() {
+		var i Review
+		if err := rows.Scan(
+			&i.ID,
+			&i.Ord,
+			&i.BookingID,
+			&i.ListingID,
+			&i.FromID,
+			&i.ToID,
+			&i.FromRole,
+			&i.Rating,
+			&i.Comment,
+			&i.CreatedAt,
+			&i.VisibleAt,
+			&i.Released,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const nextBookingNumber = `-- name: NextBookingNumber :one
 SELECT nextval('booking_code_seq')::bigint
 `

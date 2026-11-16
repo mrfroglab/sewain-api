@@ -44,7 +44,9 @@ browser ─► Cloudflare Tunnel ─► Caddy ─► api :8080 ─┬─► Post
 - **Snapshot** (`GET /api/v1/state`): bentuk `DataState` web + `scope`, `viewerId`, `listingBusy`,
   `users[].publicStats`, `reviews[].visibleAt`. `SNAPSHOT_SCOPE=scoped` (wajib di produksi) menyaring per viewer
   (ROADMAP §4): tamu = data publik; user = + datanya sendiri dan booking tempat ia jadi pihak; admin = semua.
-  `SNAPSHOT_USERS=referenced` membatasi `users` ke profil yang dirujuk snapshot itu (admin tetap semua).
+  `SNAPSHOT_USERS=referenced` (default) membatasi `users` ke profil yang dirujuk snapshot itu, plus semua persona
+  demo di DEMO_MODE (admin tetap semua). Profil lain: `GET /api/v1/users/{id}`. ETag = versi perubahan yang relevan
+  untuk viewer itu (publik + yang menyebut dia), jadi perubahan pribadi user lain tetap 304.
   Lokasi listing/papan milik orang lain = `geo.FuzzPoint` (≤ 400 m). `src` foto bukti = URL bertanda tangan untuk
   viewer itu (pihak: salinan ber-watermark, admin: asli); foto yang tidak boleh dilihat tidak dikirim.
 - **Realtime**: setiap commit menulis `change_log` (versi) lalu event `{type:"changed",version}` hanya ke pihak
@@ -130,7 +132,7 @@ Contoh lengkap: [`deploy/.env.example`](deploy/.env.example). Kolom "Prod" = waj
 | `PORT` | – | `8080` | |
 | `MIGRATE_ON_START` | – | `true` | |
 | `SNAPSHOT_SCOPE` | – | `scoped` | `full` hanya dengan `DEMO_MODE`, ditolak di produksi |
-| `SNAPSHOT_USERS` | – | `all` | `referenced` = snapshot non-admin hanya memuat profil user yang dirujuk isinya (pemilik listing, pihak booking, ulasan, papan, ...). Biaya snapshot tidak lagi naik dengan jumlah akun. Lihat [`docs/loadtest/2026-11-report.md`](docs/loadtest/2026-11-report.md) |
+| `SNAPSHOT_USERS` | – | `referenced` | `referenced` = snapshot non-admin hanya memuat profil user yang dirujuk isinya (pemilik listing, pihak booking, ulasan, papan, ...) plus persona demo di DEMO_MODE. Biaya snapshot tidak naik dengan jumlah akun. `all` = semua profil (perilaku lama). Lihat [`docs/loadtest/2026-11-report.md`](docs/loadtest/2026-11-report.md) |
 | `DATABASE_URL` `?pool_max_conns=N` | – | `max(4, jumlah CPU)` | Ukuran pool pgx (parameter URL bawaan pgx). Saran: 16 di server ini, 8 di VPS 2 vCPU |
 | `PAYMENT_MODE` | – | `offline` | `simulated` (default demo, ditolak di produksi) \| `offline` \| `gateway` (belum ada) |
 | `CORS_ORIGINS` | ya | `https://sewain.me` | Origin web, pisah koma. `*` ditolak di produksi |
@@ -146,6 +148,7 @@ Contoh lengkap: [`deploy/.env.example`](deploy/.env.example). Kolom "Prod" = waj
 | `OTP_MAX_PER_PHONE_HOUR` | – | `5` | Kode OTP per nomor per jam |
 | `OTP_MAX_PER_IP_HOUR` | – | `200` | Kode OTP per IP (IPv6 per /64) per jam. Tinggi karena NAT kampus |
 | `OTP_MAX_SENDS_PER_DAY` | – | `2000` | Plafon global kode terkirim per hari WIB (anti SMS/WA pumping). Tercapai → OTP ditolak sampai 00.00 WIB, log `WARN`, satu notifikasi ke admin |
+| `RATE_IP_PER_MIN`, `RATE_IP_BURST` | – | `6000`, `3000` | Rem murah per IP **sebelum** auth (token/cookie palsu tidak memicu lookup sesi). Jauh di atas lalu lintas NAT kampus |
 | `RATE_PUBLIC_PER_MIN`, `RATE_PUBLIC_BURST` | – | `1200`, `300` | Batas global semua rute, per user (tamu per IP) |
 | `RATE_WRITE_PER_MIN`, `RATE_WRITE_BURST` | – | `120`, `40` | Aksi dan mutasi lain, per user (tamu per IP) |
 | `RATE_UPLOAD_PER_MIN`, `RATE_UPLOAD_BURST` | – | `30`, `10` | Unggah foto/KYC, per user |

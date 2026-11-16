@@ -45,13 +45,14 @@ type Deps struct {
 
 // RateProfiles are the per-route rate limits (docs/integration/ops.md §2). Zero values use the ratelimit defaults.
 type RateProfiles struct {
-	Public, Write, Upload, Auth, Demo ratelimit.Profile
+	IP, Public, Write, Upload, Auth, Demo ratelimit.Profile
 }
 
 // ProfilesFromRates builds the built-in profiles (names and keys) with the configured rates (RATE_* env).
 func ProfilesFromRates(r ratelimit.Rates) RateProfiles {
 	r = r.WithDefaults()
 	return RateProfiles{
+		IP:     ratelimit.IP.With(r.IP),
 		Public: ratelimit.Public.With(r.Public),
 		Write:  ratelimit.Write.With(r.Write),
 		Upload: ratelimit.Upload.With(r.Upload),
@@ -61,6 +62,9 @@ func ProfilesFromRates(r ratelimit.Rates) RateProfiles {
 }
 
 func (p RateProfiles) withDefaults() RateProfiles {
+	if p.IP.Name == "" {
+		p.IP = ratelimit.IP
+	}
 	if p.Public.Name == "" {
 		p.Public = ratelimit.Public
 	}
@@ -116,6 +120,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/config", s.publicConfig)
 	mux.HandleFunc("GET /api/v1/state", s.state)
 	mux.HandleFunc("GET /api/v1/listings/search", s.search)
+	mux.HandleFunc("GET /api/v1/users/{id}", s.publicUser)
 	mux.Handle("GET /api/v1/events", d.Hub)
 
 	// Auth (OTP, sessions) and the DEMO_MODE persona login.
@@ -194,6 +199,9 @@ func (s *Server) Routes() http.Handler {
 		middleware.Timeout(s.cfg.RequestTimeout, middleware.TimeoutOptions{}),
 		clientAddr,
 		s.wsQueryToken,
+		// Cheap per-IP brake before any session lookup (review wave 2, L6): made-up tokens from one address stop
+		// here. Generous enough for a campus NAT.
+		rl(d.Profiles.IP),
 		d.Auth.Middleware, // also records the user for logs and per-user rate limits (middleware.SetUserID)
 		// The coarse limit on every route runs after the viewer is resolved so signed-in students behind one campus
 		// NAT each get their own bucket; guests (and invalid tokens) share the bucket of their IP.
@@ -484,6 +492,23 @@ func (s *Server) demoControl(w http.ResponseWriter, r *http.Request, viewer *ser
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": ch.Version})
+}
+
+// publicUser is GET /api/v1/users/{id}: the public profile of one user (the users[] entry of a guest snapshot), their
+// active listings and the reviews about them that are shown. The same for every viewer, so publicly cacheable.
+func (s *Server) publicUser(w http.ResponseWriter, r *http.Request) {
+	page, err := s.svc.PublicUser(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.log.Error("public user", "err", err)
+		writeErr(w, http.StatusInternalServerError, "Gagal memuat profil.")
+		return
+	}
+	if page == nil {
+		writeErr(w, http.StatusNotFound, "Pengguna tidak ditemukan.")
+		return
+	}
+	w.Header().Set("Cache-Control", "public, max-age=60")
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": page.User, "listings": page.Listings, "reviews": page.Reviews})
 }
 
 func (s *Server) search(w http.ResponseWriter, r *http.Request) {

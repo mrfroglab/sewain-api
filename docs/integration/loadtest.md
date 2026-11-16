@@ -20,3 +20,9 @@ Laporan lengkap: [`docs/loadtest/2026-11-report.md`](../loadtest/2026-11-report.
   publik (`listingBusy`) dicatat sebagai temuan 7.2/7.3 di laporan untuk core-v2. Memperbaikinya mengubah semantik
   event realtime.
 - **Ukuran pool tanpa kode baru:** pgx sudah membaca `pool_max_conns` dari `DATABASE_URL`.
+
+## Tindak lanjut (worker `polish`)
+
+Keputusan "default `all`" dan "ETag/realtime tidak diubah" di atas sudah diganti: default kini `referenced` (persona
+demo tetap ada di DEMO_MODE), `GET /api/v1/users/{id}` untuk profil yang tidak dirujuk, ETag per viewer, dan
+`saveBooking` menandai perubahan publik. Lihat `docs/loadtest/2026-11-report.md` §10 dan `docs/integration/polish.md`.

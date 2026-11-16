@@ -13,7 +13,7 @@ func bookingInput(l *domain.Listing, start, end string) map[string]any {
 
 func listingInput(title string) map[string]any {
 	return map[string]any{
-		"title": title, "category": "camping", "description": "Tenda bagus", "photos": []string{"/a.webp", "/b.webp", "/c.webp"},
+		"title": title, "category": "camping", "description": "Tenda bagus", "photos": []string{"/img/listings/a.webp", "/img/listings/b.webp", "/img/listings/c.webp"},
 		"pricePerDay": 20000, "itemValue": 300000, "collateralOptions": []map[string]any{{"id": "co-x1", "kind": "identitas", "cards": []string{"KTM"}}},
 		"location": map[string]any{"lat": -7.77, "lng": 110.37, "areaId": "ugm"}, "radiusKm": 3, "handover": []string{"cod"},
 		"rules": map[string]any{"lateFeePerDay": 10000, "lateFeeCapPercent": 100, "cancellation": "Gratis"},
@@ -277,7 +277,7 @@ func TestDisputeAndAdminActions(t *testing.T) {
 		t.Fatal(msg)
 	}
 	e.must("u-raka", "proposeSolution", "u-raka", did, map[string]any{"type": "tanpa-kompensasi"})
-	e.must("u-tini", "proposeSolution", "u-tini", did, map[string]any{"type": "potong-deposit", "amount": 50000})
+	e.must("u-tini", "proposeSolution", "u-tini", did, map[string]any{"type": "ganti-nilai", "amount": 50000})
 	var props []domain.DisputeProposal
 	for _, d := range e.state().Disputes {
 		if d.ID == did {

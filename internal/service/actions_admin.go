@@ -27,6 +27,9 @@ func (t *txn) openDispute(actor, bookingID domain.ID, in domain.DisputeInput, wa
 	if strings.TrimSpace(in.Description) == "" {
 		return "", domain.Fail("Ceritakan masalahnya.")
 	}
+	if err := domain.CheckLen("Deskripsi masalah", strings.TrimSpace(in.Description), domain.MaxDescriptionLen); err != nil {
+		return "", err
+	}
 	if in.PhotoIDs == nil {
 		in.PhotoIDs = []domain.ID{}
 	}
@@ -72,6 +75,10 @@ func (t *txn) proposeSolution(actor, id domain.ID, in domain.ProposalInput) erro
 	}
 	if domain.ProposalLabel[in.Type] == "" {
 		return domain.Fail("Jenis solusi tidak dikenal.")
+	}
+	if err := domain.FirstErr(domain.CheckLenPtr("Catatan usulan", in.Note, domain.MaxNoteLen),
+		domain.ValidateProposalAmount(b, in.Type, in.Amount)); err != nil {
+		return err
 	}
 	t.check(t.q.InsertDisputeProposal(t.ctx, dbq.InsertDisputeProposalParams{ID: domain.NewID("pr"), DisputeID: id, ByID: actor, Type: in.Type,
 		Amount: in.Amount, Note: in.Note, At: tsOf(t.now), Status: "diajukan"}))
@@ -157,8 +164,21 @@ func (t *txn) adminRecommend(adminID, id domain.ID, text string, amount *int64) 
 	if d == nil {
 		return domain.Fail("Sengketa tidak ditemukan.")
 	}
+	if d.Status == "selesai" {
+		return domain.Fail("Sengketa sudah selesai. Rekomendasi tidak bisa diubah lagi.")
+	}
 	if strings.TrimSpace(text) == "" {
 		return domain.Fail("Tulis rekomendasinya.")
+	}
+	if err := domain.CheckLen("Rekomendasi", strings.TrimSpace(text), domain.MaxDescriptionLen); err != nil {
+		return err
+	}
+	if b != nil {
+		if err := domain.ValidateProposalAmount(b, "", amount); err != nil {
+			return err
+		}
+	} else if amount != nil && (*amount < 0 || *amount > domain.MaxRupiah) {
+		return domain.Fail("Nominal tidak valid.")
 	}
 	d.Layer, d.Status = "L2", "mediasi"
 	d.Recommendation = &domain.Recommendation{Text: strings.TrimSpace(text), Amount: amount, ByAdminID: adminID, At: t.now}
@@ -186,8 +206,14 @@ func (t *txn) resolveDispute(adminID, id domain.ID, outcome string) error {
 	if d == nil {
 		return domain.Fail("Sengketa tidak ditemukan.")
 	}
+	if d.Status == "selesai" {
+		return domain.Fail("Sengketa sudah selesai.")
+	}
 	if strings.TrimSpace(outcome) == "" {
 		return domain.Fail("Tulis hasil akhirnya.")
+	}
+	if err := domain.CheckLen("Hasil akhir", strings.TrimSpace(outcome), domain.MaxDescriptionLen); err != nil {
+		return err
 	}
 	d.Status, d.Outcome, d.ResolvedAt = "selesai", domain.Ptr(strings.TrimSpace(outcome)), domain.Ptr(t.now)
 	t.saveDispute(d)
@@ -212,6 +238,13 @@ func (t *txn) createReport(reporterID domain.ID, in domain.ReportInput, wantID s
 	if strings.TrimSpace(in.Reason) == "" {
 		return "", domain.Fail("Pilih alasan laporan.")
 	}
+	if err := domain.FirstErr(domain.CheckLen("Alasan laporan", in.Reason, domain.MaxReasonLen),
+		domain.CheckLenPtr("Detail laporan", in.Detail, domain.MaxDescriptionLen)); err != nil {
+		return "", err
+	}
+	if !t.reportTargetExists(in.TargetType, in.TargetID) {
+		return "", domain.Fail("Yang kamu laporkan tidak ditemukan.")
+	}
 	id := t.pickID(wantID, "rp", t.q.ReportExists)
 	t.check(t.q.InsertReport(t.ctx, dbq.InsertReportParams{ID: id, ReporterID: reporterID, TargetType: in.TargetType, TargetID: in.TargetID,
 		Reason: in.Reason, Detail: in.Detail, Status: "baru", CreatedAt: tsOf(t.now)}))
@@ -231,9 +264,15 @@ func (t *txn) resolveReport(adminID, reportID domain.ID, status, resolution stri
 	if status != "ditindak" && status != "ditolak" {
 		return domain.Fail("Status laporan tidak dikenal.")
 	}
+	if err := domain.CheckLen("Catatan tindakan", resolution, domain.MaxNoteLen); err != nil {
+		return err
+	}
 	r, err := t.q.GetReportForUpdate(t.ctx, reportID)
 	if !t.found(err) {
 		return domain.Fail("Laporan tidak ditemukan.")
+	}
+	if r.Status != "baru" {
+		return domain.Fail("Laporan ini sudah ditinjau (" + r.Status + ").")
 	}
 	t.check(t.q.ResolveReport(t.ctx, dbq.ResolveReportParams{ID: r.ID, Status: status, Resolution: domain.Ptr(resolution), ResolvedAt: tsPtr(&t.now), ResolvedBy: domain.Ptr(adminID)}))
 	t.touch(r.ReporterID)
@@ -252,6 +291,9 @@ func (t *txn) addStrike(adminID, userID domain.ID, in domain.StrikeInput) error 
 	}
 	if in.Severity != "berat" {
 		in.Severity = "ringan"
+	}
+	if err := domain.CheckLen("Alasan strike", in.Reason, domain.MaxReasonLen); err != nil {
+		return err
 	}
 	add := 1
 	if in.Severity == "berat" {
@@ -278,6 +320,9 @@ func (t *txn) setUserStatus(adminID, userID domain.ID, status, reason string) er
 	}
 	if status != "aktif" && status != "suspend" && status != "blacklist" {
 		return domain.Fail("Status tidak dikenal.")
+	}
+	if err := domain.CheckLen("Alasan", reason, domain.MaxReasonLen); err != nil {
+		return err
 	}
 	old := u.Status
 	u.Status = status
@@ -368,6 +413,16 @@ func (t *txn) createWanted(requesterID domain.ID, in domain.WantedInput, wantID 
 	if strings.TrimSpace(in.Title) == "" {
 		return "", domain.Fail("Tulis barang yang kamu cari.")
 	}
+	if err := domain.FirstErr(domain.CheckLen("Judul permintaan", strings.TrimSpace(in.Title), domain.MaxShortLen),
+		domain.CheckLen("Deskripsi permintaan", in.Description, domain.MaxDescriptionLen)); err != nil {
+		return "", err
+	}
+	if in.BudgetPerDay != nil && (*in.BudgetPerDay < 0 || *in.BudgetPerDay > domain.MaxRupiah) {
+		return "", domain.Fail("Budget per hari tidak valid.")
+	}
+	if in.RadiusKm < 0 || in.RadiusKm > domain.MaxListingRadius {
+		return "", domain.Fail(fmt.Sprintf("Jangkauan maksimal %d km.", domain.MaxListingRadius))
+	}
 	if words := domain.BannedWordsIn(in.Title+" "+in.Description, t.bannedKeywords()); len(words) > 0 {
 		return "", domain.Fail("Ada kata yang dilarang: " + strings.Join(words, ", ") + ".")
 	}
@@ -405,6 +460,9 @@ func (t *txn) offerWanted(providerID, wantedID domain.ID, listingID *domain.ID, 
 	if w.RequesterID == providerID {
 		return domain.Fail("Ini permintaanmu sendiri.")
 	}
+	if err := domain.CheckLen("Pesan tawaran", message, domain.MaxNoteLen); err != nil {
+		return err
+	}
 	if err := domain.CanTransact(t.user(providerID)); err != nil {
 		return err
 	}
@@ -436,4 +494,17 @@ func (t *txn) closeWanted(requesterID, wantedID domain.ID, status string) error 
 	t.touch(requesterID)
 	t.touchPublic()
 	return nil
+}
+
+// reportTargetExists: a report must point at an existing listing or a user that is not deleted (review wave 2, L2).
+func (t *txn) reportTargetExists(kind string, id domain.ID) bool {
+	if id == "" {
+		return false
+	}
+	q := `SELECT EXISTS (SELECT 1 FROM listings WHERE id = $1)`
+	if kind == "user" {
+		q = `SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND deleted_at IS NULL)`
+	}
+	var ok bool
+	return t.check(t.tx.QueryRow(t.ctx, q, id).Scan(&ok)) && ok
 }

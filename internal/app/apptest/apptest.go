@@ -131,6 +131,7 @@ func New(t *testing.T, opt Options) *API {
 	if !opt.RealRateLimits {
 		big := ratelimit.Rate{Limit: 1_000_000, Per: time.Minute, Burst: 1_000_000}
 		ao.RateProfiles = httpapi.RateProfiles{
+			IP:     ratelimit.Profile{Name: "ip", Rate: big, Key: ratelimit.ByIP},
 			Public: ratelimit.Profile{Name: "public", Rate: big, Key: ratelimit.ByIP},
 			Write:  ratelimit.Profile{Name: "write", Rate: big, Key: ratelimit.ByUser},
 			Upload: ratelimit.Profile{Name: "upload", Rate: big, Key: ratelimit.ByUser},

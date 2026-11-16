@@ -61,6 +61,9 @@ func (t *txn) createBooking(renterID domain.ID, in domain.BookingInput, wantID s
 	if !domain.Contains(l.Handover, in.Handover) {
 		return "", domain.Fail("Metode serah terima tidak tersedia.")
 	}
+	if err := domain.CheckLenPtr("Catatan untuk penyedia", in.Note, domain.MaxNoteLen); err != nil {
+		return "", err
+	}
 	quote := domain.QuoteRent(l, in.StartDate, in.EndDate)
 	if l.MinDays != nil && quote.Days < *l.MinDays {
 		return "", domain.Fail(fmt.Sprintf("Minimal sewa %d hari.", *l.MinDays))
@@ -136,6 +139,9 @@ func (t *txn) declineBooking(providerID, id domain.ID, reason string) error {
 		return domain.Fail("Request ini sudah tidak menunggu persetujuan.")
 	}
 	reason = strings.TrimSpace(reason)
+	if err := domain.CheckLen("Alasan penolakan", reason, domain.MaxReasonLen); err != nil {
+		return err
+	}
 	if reason == "" {
 		reason = "Tidak ada alasan."
 	}
@@ -155,6 +161,9 @@ func (t *txn) cancelBooking(actor, id domain.ID, reason string) error {
 		return domain.Fail("Booking hanya bisa dibatalkan sebelum serah terima.")
 	}
 	reason = strings.TrimSpace(reason)
+	if err := domain.CheckLen("Alasan pembatalan", reason, domain.MaxReasonLen); err != nil {
+		return err
+	}
 	if reason == "" {
 		reason = "-"
 	}
@@ -238,6 +247,9 @@ func (t *txn) submitCheckout(actor, id domain.ID, in domain.CheckoutInput) error
 	if len(in.CollateralPhotoIDs) < 1 {
 		return domain.Fail("Foto jaminan wajib (FR-J5).")
 	}
+	if err := checkMeters(in.Odometer, in.Fuel); err != nil {
+		return err
+	}
 	if all := append(append([]domain.ID{}, in.PhotoIDs...), in.CollateralPhotoIDs...); !t.photosExist(all) {
 		return domain.Fail("Ada foto yang belum terunggah ke server. Coba lagi.")
 	} else if !t.evidenceOf(b, actor, all) {
@@ -314,6 +326,9 @@ func (t *txn) rejectAtCheckout(renterID, id domain.ID, note string) error {
 	if b.Status != "ACCEPTED" {
 		return domain.Fail("Hanya saat serah terima.")
 	}
+	if err := domain.CheckLen("Catatan", note, domain.MaxNoteLen); err != nil {
+		return err
+	}
 	t.check(t.q.InsertReport(t.ctx, dbq.InsertReportParams{ID: domain.NewID("rp"), ReporterID: renterID, TargetType: "listing", TargetID: b.ListingID,
 		Reason: "Barang tidak sesuai deskripsi (saat serah terima)", Detail: domain.Ptr(note), Status: "baru", CreatedAt: tsOf(t.now)}))
 	b.Status, b.CancelledAt, b.CancelledBy, b.CancelReason = "CANCELLED", domain.Ptr(t.now), domain.Ptr(renterID), domain.Ptr("Barang tidak sesuai deskripsi: "+note)
@@ -340,6 +355,10 @@ func (t *txn) submitCheckin(actor, id domain.ID, in domain.CheckinInput) error {
 	}
 	if in.Result == "masalah" && (domain.Deref(in.ProblemType, "") == "" || len(in.ProblemPhotoIDs) == 0) {
 		return domain.Fail("Pilih jenis masalah dan lampirkan foto masalahnya.")
+	}
+	if err := domain.FirstErr(checkMeters(in.Odometer, in.Fuel), domain.CheckLenPtr("Jenis masalah", in.ProblemType, domain.MaxShortLen),
+		domain.CheckLenPtr("Catatan masalah", in.ProblemNote, domain.MaxNoteLen)); err != nil {
+		return err
 	}
 	all := append(append([]domain.ID{}, in.PhotoIDs...), in.ProblemPhotoIDs...)
 	if !t.photosExist(all) {
@@ -433,6 +452,9 @@ func (t *txn) submitReview(fromID, id domain.ID, rating float64, comment string)
 	if rating < 1 || rating > 5 {
 		return domain.Fail("Rating 1–5.")
 	}
+	if err := domain.CheckLen("Ulasan", strings.TrimSpace(comment), domain.MaxMessageLen); err != nil {
+		return err
+	}
 	role, to := "penyewa", b.ProviderID
 	if fromID == b.ProviderID {
 		role, to = "penyedia", b.RenterID
@@ -463,6 +485,9 @@ func (t *txn) sendMessage(senderID, id domain.ID, text *string, photoID *domain.
 	}
 	if clean == "" && photoID == nil {
 		return domain.Fail("Pesan kosong.")
+	}
+	if err := domain.CheckLen("Pesan", clean, domain.MaxMessageLen); err != nil {
+		return err
 	}
 	if photoID != nil && !t.photosExist([]domain.ID{*photoID}) {
 		return domain.Fail("Foto belum terunggah ke server. Coba lagi.")
@@ -503,4 +528,9 @@ func (t *txn) markNotificationsRead(userID domain.ID, ids []domain.ID) error {
 		t.touch(userID)
 	}
 	return nil
+}
+
+// checkMeters bounds the vehicle readings typed at check-out/check-in.
+func checkMeters(odometer, fuel *string) error {
+	return domain.FirstErr(domain.CheckLenPtr("Odometer", odometer, domain.MaxMeterLen), domain.CheckLenPtr("Indikator BBM", fuel, domain.MaxMeterLen))
 }

@@ -98,6 +98,7 @@ bukan bilangan bulat 1–1.000.000 membuat proses **gagal start** dengan pesan y
 
 | Profil | Default | Burst | Key | Env | Dipakai untuk |
 |---|---|---|---|---|---|
+| `ip` | 6000/menit | 3000 | IP | `RATE_IP_PER_MIN`, `RATE_IP_BURST` | Rem murah di depan **semua** rute, dipasang **sebelum** `auth.Middleware` (review gelombang 2, L6): token/cookie acak dari satu IP berhenti di sini tanpa lookup sesi |
 | `public` | 1200/menit | 300 | user (tamu → IP) | `RATE_PUBLIC_PER_MIN`, `RATE_PUBLIC_BURST` | Global (semua rute), termasuk `GET /api/v1/state` (snapshot), `GET /api/v1/listings/search`, `GET /api/v1/photos/{id}`, `GET /api/v1/events` (handshake WebSocket) |
 | `write` | 120/menit | 40 | user (tamu → IP) | `RATE_WRITE_PER_MIN`, `RATE_WRITE_BURST` | `POST /api/v1/actions/{name}`, `POST/DELETE /api/v1/push/subscriptions`, `PUT /api/v1/me/notification-prefs`, `DELETE /api/v1/me`, `POST /api/v1/auth/logout`, `DELETE /api/v1/auth/sessions`, `POST /api/v1/admin/listings/import` |
 | `upload` | 30/menit | 10 | user (tamu → IP) | `RATE_UPLOAD_PER_MIN`, `RATE_UPLOAD_BURST` | `POST /api/v1/photos`, `POST /api/v1/photos/demo`, `POST /api/v1/kyc/submissions` |
@@ -115,6 +116,11 @@ satu mesin.
   yang sudah masuk punya bucket sendiri. Tamu (dan token yang tidak valid) berbagi bucket IP. 1200/menit per IP
   untuk tamu cukup untuk sekitar 300 pengunjung anonim yang membuka snapshot dan beberapa foto per menit. Satu IP
   yang membanjiri tetap kena 429 setelah 300 request beruntun (lalu 20/detik).
+- **`ip` sebelum auth.** Karena `public` berjalan setelah auth, request dengan token acak sempat memicu lookup sesi
+  sebelum kena limit. Rem `ip` (6000/menit, burst 3000) hanya melihat alamat, jadi murah, dan jauh di atas NAT
+  kampus: 300 mahasiswa aktif menghasilkan ±3.600 request/menit di uji beban (`docs/loadtest/2026-11-report.md`),
+  dan tes `TestCampusNATDefaults` (300 mahasiswa × 9 request sekaligus = 2.700) tetap lulus. Tes
+  `TestFakeTokenFloodStopsBeforeAuth` membuktikan request yang ditolak tidak pernah sampai ke auth.
 - **`write`/`upload` per user.** Pola wajar satu mahasiswa: 1 snapshot + 5 aksi + 3 foto per menit. Default
   memberi ruang 4–24× pola itu, dan burst cukup untuk mengunggah semua foto checkout sekaligus.
 - **`auth` 60/menit, burst 20 per IP.** Booth pendaftaran bisa memproses puluhan nomor per menit dari satu IP.

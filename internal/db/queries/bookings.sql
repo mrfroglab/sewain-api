@@ -118,3 +118,7 @@ UPDATE reviews SET visible_at = LEAST(visible_at, @now), released = true WHERE b
 
 -- name: ReleaseDueReviews :many
 UPDATE reviews SET released = true WHERE NOT released AND visible_at <= @now RETURNING from_id, to_id;
+
+-- name: ListVisibleReviewsAbout :many
+-- Public profile page: reviews about a user that are shown (released, or past visible_at, FR-T2).
+SELECT * FROM reviews WHERE to_id = @to_id AND (released OR visible_at <= @now::timestamptz) ORDER BY ord;

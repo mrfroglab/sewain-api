@@ -51,6 +51,14 @@ func BenchmarkSnapshot(b *testing.B) {
 					}
 				}
 			})
+			b.Run(mode+"/"+vw.name+"/etag", func(b *testing.B) { // the 304 check, per-viewer version (load test 7.2)
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					if _, _, err := svc.ETag(ctx, v); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
 			b.Run(mode+"/"+vw.name+"/json", func(b *testing.B) {
 				b.ReportAllocs()
 				b.SetBytes(int64(len(body)))

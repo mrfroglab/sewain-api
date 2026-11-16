@@ -346,6 +346,12 @@ func TestStateETagAndScope(t *testing.T) {
 	if r3 := a.do("GET", "/api/v1/state", "", nil, "If-None-Match", etag); r3.status != 200 {
 		t.Fatalf("another viewer must not get a 304: %d", r3.status)
 	}
+	// Another user's private change keeps Raka's ETag: his refetch is a 304 (load test 7.2).
+	sinta := a.login("u-sinta")
+	a.ok(sinta, "toggleFavorite", "u-sinta", "l-headlamp")
+	if r5 := a.do("GET", "/api/v1/state", raka, nil, "If-None-Match", etag); r5.status != 304 {
+		t.Fatalf("another user's favorite must keep the ETag: %d", r5.status)
+	}
 	a.ok(raka, "toggleFavorite", "u-raka", "l-headlamp")
 	if r4 := a.do("GET", "/api/v1/state", raka, nil, "If-None-Match", etag); r4.status != 200 {
 		t.Fatalf("new version must not be 304: %d", r4.status)
