@@ -35,7 +35,8 @@ const (
 const UsersFixture = `CREATE TABLE IF NOT EXISTS users (
 	id text PRIMARY KEY, phone text UNIQUE, role text DEFAULT 'user', status text DEFAULT 'aktif')`
 
-// DB opens a pool on a fresh schema (dropped on cleanup) with the users fixture and the auth migrations.
+// DB opens a pool on a fresh schema (dropped on cleanup unless AUTHTEST_KEEP_SCHEMA is set, e.g. to
+// inspect it with pg_dump) with the users fixture and the auth migrations.
 func DB(t testing.TB) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
@@ -64,6 +65,10 @@ func DB(t testing.TB) *pgxpool.Pool {
 	}
 	t.Cleanup(func() {
 		pool.Close()
+		if os.Getenv("AUTHTEST_KEEP_SCHEMA") != "" {
+			t.Logf("keeping schema %s (AUTHTEST_KEEP_SCHEMA)", schema)
+			return
+		}
 		c, err := pgx.Connect(context.Background(), dsn)
 		if err == nil {
 			_, _ = c.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE")
