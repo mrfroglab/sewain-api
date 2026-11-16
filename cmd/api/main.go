@@ -154,7 +154,11 @@ func serve(log *slog.Logger) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	return run(ctx, cfg, log)
+}
 
+// run serves cfg until ctx ends.
+func run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	pool, err := db.OpenWithRetry(ctx, cfg.DatabaseURL, 30, 2*time.Second, func(attempt int) {
 		log.Info("waiting for database", "attempt", attempt)
 	})

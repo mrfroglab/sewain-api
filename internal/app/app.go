@@ -131,6 +131,7 @@ func New(cfg config.Config, pool *pgxpool.Pool, log *slog.Logger, opt Options) (
 	if a.KYC, err = kyc.NewService(pool, a.Storage, auditor{pool: pool}, cfg.KYC); err != nil {
 		return nil, err
 	}
+	a.Auth.Now, a.KYC.Now = now, now
 	a.KYC.Hooks = kyc.Hooks{
 		OnSubmitted: func(ctx context.Context, tx pgx.Tx, s kyc.Submission) error {
 			return asAuthError(a.Svc.KYCSubmitted(ctx, tx, kycEvent(s)))

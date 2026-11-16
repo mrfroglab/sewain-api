@@ -16,6 +16,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -135,7 +136,11 @@ func New(t *testing.T, opt Options) *API {
 			Auth:   ratelimit.Profile{Name: "auth", Rate: big, Key: ratelimit.ByIP},
 		}
 	}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var logOut io.Writer = io.Discard
+	if os.Getenv("APPTEST_LOG") != "" {
+		logOut = os.Stderr
+	}
+	log := slog.New(slog.NewTextHandler(logOut, nil))
 	a, err := app.New(cfg, pool, log, ao)
 	if err != nil {
 		t.Fatalf("app: %v", err)
