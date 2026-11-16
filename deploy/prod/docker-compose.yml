@@ -1,0 +1,56 @@
+# Stack PRODUKSI Sewain: /opt/stacks/apps/sewain-prod  (db + api + web, jaringan gateway-net). ROADMAP F7.1.
+# Dipasang oleh deploy/prod/setup.sh. Image dari tag rilis (vX.Y.Z → :prod). Rahasia di .env (izin 600, hanya di
+# server; salinan kunci KYC/NIK_PEPPER juga di password manager). DEMO_MODE dan OTP echo DITOLAK saat start.
+services:
+  db:
+    image: postgis/postgis:16-3.4-alpine
+    container_name: sewain-prod-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sewain
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: sewain
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sewain -d sewain"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    shm_size: 128m
+    mem_limit: 768m
+    networks: [gateway-net]
+
+  api:
+    image: ghcr.io/mrfroglab/sewain-api:${API_TAG:-prod}
+    container_name: sewain-prod-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: [.env]
+    environment:
+      PORT: "8080"
+      APP_ENV: production
+      DEMO_MODE: "false"
+      SNAPSHOT_SCOPE: scoped
+      DATABASE_URL: postgres://sewain:${DB_PASSWORD}@sewain-prod-db:5432/sewain?sslmode=disable
+      UPLOAD_DIR: /data/uploads
+      WEB_ORIGIN: http://sewain-prod-web:3000
+    volumes:
+      - ./data/uploads:/data/uploads
+    mem_limit: 512m
+    networks: [gateway-net]
+
+  web:
+    image: ghcr.io/mrfroglab/sewain-web:${WEB_TAG:-prod}
+    container_name: sewain-prod-web
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+    mem_limit: 512m
+    networks: [gateway-net]
+
+networks:
+  gateway-net:
+    external: true
