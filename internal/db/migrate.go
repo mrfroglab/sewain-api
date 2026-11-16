@@ -26,7 +26,7 @@ func provider(pool *pgxpool.Pool) (*goose.Provider, *sql.DB, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	// A session-level advisory lock serialises concurrent instances starting at the same time.
+	// A session-level advisory lock serializes concurrent instances starting at the same time.
 	locker, err := lock.NewPostgresSessionLocker(lock.WithLockID(LockMigrate))
 	if err != nil {
 		return nil, nil, err

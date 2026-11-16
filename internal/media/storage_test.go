@@ -19,7 +19,7 @@ import (
 	"github.com/minio/minio-go/v7"
 )
 
-// storageContract runs the behaviour every Storage must have.
+// storageContract runs the behavior every Storage must have.
 func storageContract(t *testing.T, st Storage) {
 	ctx := context.Background()
 	jpg := makeJPEG(t, 40, 40)

@@ -9,7 +9,7 @@ import (
 )
 
 // committedOverlaps counts bookings holding stock on overlapping dates (FR-R4). The caller holds the listing lock,
-// so concurrent requests/acceptances for the same listing are serialised and see each other's commits.
+// so concurrent requests/acceptances for the same listing are serialized and see each other's commits.
 func (t *txn) committedOverlaps(listingID, excludeID domain.ID, start, end string) int {
 	n, err := t.q.CountCommittedOverlaps(t.ctx, dbq.CountCommittedOverlapsParams{ListingID: listingID, ExcludeID: excludeID,
 		StartDate: dateOf(start), EndDate: dateOf(end)})

@@ -21,9 +21,9 @@ var coreTables = []string{
 
 // IsEmpty reports whether the database has never been seeded or used.
 func (s *Service) IsEmpty(ctx context.Context) (bool, error) {
-	var any bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users) OR EXISTS (SELECT 1 FROM commission_configs)`).Scan(&any)
-	return !any, err
+	var used bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users) OR EXISTS (SELECT 1 FROM commission_configs)`).Scan(&used)
+	return !used, err
 }
 
 // ResetDemo replaces all data with the demo seed anchored at the real "now", in one transaction (truncate + seed).
@@ -161,7 +161,7 @@ func (t *txn) loadData(d *domain.Data) {
 		t.check(q.InsertNotification(ctx, dbq.InsertNotificationParams{ID: n.ID, UserID: n.UserID, Kind: n.Kind, Title: n.Title, Body: n.Body,
 			Href: n.Href, At: tsOf(n.At), ReadAt: tsPtr(readAt)}))
 	}
-	// Favorites: v1 serialises the map with sorted keys and keeps each list in insertion order.
+	// Favorites: v1 serializes the map with sorted keys and keeps each list in insertion order.
 	for _, uid := range sortedKeys(d.Favorites) {
 		for _, lid := range d.Favorites[uid] {
 			t.check(q.InsertFavorite(ctx, dbq.InsertFavoriteParams{UserID: uid, ListingID: lid}))

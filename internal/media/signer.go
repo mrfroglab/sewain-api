@@ -82,7 +82,7 @@ func decodeKey(s string) []byte {
 // SetClock replaces the clock (tests, and the core's demo clock if wanted).
 func (s *Signer) SetClock(now func() time.Time) { s.now = now }
 
-// URLOption customises SignURL.
+// URLOption customizes SignURL.
 type URLOption func(*urlOpts)
 
 type urlOpts struct{ variant string }
@@ -93,7 +93,7 @@ func Watermarked() URLOption { return func(o *urlOpts) { o.variant = VariantWate
 
 // SignURL returns "/api/v1/photos/{id}?exp=…&u=…&sig=…" (plus "&v=wm" when Watermarked). ttl ≤ 0 means
 // DefaultURLTTL. The caller must have checked CanView for this viewer first (or use SignFor).
-// viewerID may be empty for guests; it is bound into the signature for audit, not re-authorised.
+// viewerID may be empty for guests; it is bound into the signature for audit, not re-authorized.
 func (s *Signer) SignURL(photoID, viewerID string, ttl time.Duration, opts ...URLOption) string {
 	var o urlOpts
 	for _, f := range opts {

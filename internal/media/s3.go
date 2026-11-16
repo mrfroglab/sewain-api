@@ -82,7 +82,7 @@ func (s *S3Storage) objectName(key string) (string, error) {
 	return s.prefix + key, nil
 }
 
-// Put uploads with "If-None-Match: *", so the bucket itself refuses to overwrite (R2 and MinIO honour
+// Put uploads with "If-None-Match: *", so the bucket itself refuses to overwrite (R2 and MinIO honor
 // conditional writes). The Exists pre-check only gives a cheaper error on the common path.
 func (s *S3Storage) Put(ctx context.Context, key string, data []byte, contentType string) error {
 	name, err := s.objectName(key)

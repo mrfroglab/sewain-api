@@ -19,7 +19,7 @@ type Snapshot struct {
 	ServerNow int64 `json:"serverNow"`
 }
 
-// SnapshotScope returns the effective scope (full is only honoured in DEMO_MODE).
+// SnapshotScope returns the effective scope (full is only honored in DEMO_MODE).
 func (s *Service) SnapshotScope() string {
 	if s.opt.SnapshotScope == ScopeFull && s.opt.DemoMode {
 		return ScopeFull
@@ -56,7 +56,7 @@ func (s *Service) ETagFor(viewer *Viewer, version, clockOffset int64) string {
 //   - guest: active listings (location rounded ±250 m), public profiles, released reviews, configuration, wanted posts;
 //   - user:  the same + own profile, own listings (precise), own bookings and everything attached to them, own
 //     notifications/favorites/chat reads/reports/strikes/verifications, own reviews;
-//   - admin and scope "full": everything (v1 behaviour).
+//   - admin and scope "full": everything (v1 behavior).
 func (s *Service) Snapshot(ctx context.Context, viewer *Viewer) (*Snapshot, error) {
 	var out *Snapshot
 	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {

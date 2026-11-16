@@ -13,11 +13,11 @@ const (
 	earthRadiusM = 6371008.8
 	metersPerDeg = math.Pi * earthRadiusM / 180
 
-	// CellMeters is the grid cell edge. The cell centre is at most CellMeters/√2 ≈ 283 m from any point
+	// CellMeters is the grid cell edge. The cell center is at most CellMeters/√2 ≈ 283 m from any point
 	// in the cell, i.e. a public position is "± 250 m" in the usual sense.
 	CellMeters = 400.0
-	// Offset ring around the cell centre. Every listing in a cell gets its own deterministic point on this
-	// ring, so pins of neighbouring listings do not stack, and the public point is never the cell centre.
+	// Offset ring around the cell center. Every listing in a cell gets its own deterministic point on this
+	// ring, so pins of neighboring listings do not stack, and the public point is never the cell center.
 	minOffsetMeters = 40.0
 	maxOffsetMeters = 100.0
 	// MaxErrorMeters bounds the distance between the true and the public point: 283 + 100 < 400.
@@ -40,7 +40,7 @@ func FuzzPoint(listingID string, lat, lng float64) (float64, float64) {
 	latStep := CellMeters / metersPerDeg
 	row := math.Floor(lat / latStep)
 	cLat := (row + 0.5) * latStep
-	// Columns use the cosine at the row centre, so every point of a row shares one column width.
+	// Columns use the cosine at the row center, so every point of a row shares one column width.
 	lngStep := CellMeters / (metersPerDeg * math.Cos(cLat*math.Pi/180))
 	col := math.Floor(lng / lngStep)
 	cLng := (col + 0.5) * lngStep
@@ -73,7 +73,7 @@ func DistanceKm(lat1, lng1, lat2, lng2 float64) float64 {
 }
 
 // RoundDistanceKm rounds a distance for display. Below 0.5 km it reports 0.5 (closer than that is within
-// the fuzz and must not look precise); up to 10 km one decimal; beyond that whole kilometres.
+// the fuzz and must not look precise); up to 10 km one decimal; beyond that whole kilometers.
 func RoundDistanceKm(km float64) float64 {
 	switch {
 	case math.IsNaN(km) || km < 0:

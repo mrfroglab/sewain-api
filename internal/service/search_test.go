@@ -32,7 +32,7 @@ func TestSearch(t *testing.T) {
 		}
 	}
 	// Two-way rule from Pogung, checked against independently computed distances (away from the edges, where the
-	// spheroid and haversine distances may disagree by a few metres). Same result as v1: scripts/compare-v1.sh.
+	// spheroid and haversine distances may disagree by a few meters). Same result as v1: scripts/compare-v1.sh.
 	plat, plng := -7.7596, 110.3727
 	pogung, _ := e.svc.Search(e.ctx, service.SearchParams{Lat: plat, Lng: plng, RadiusKm: 3})
 	hits, hidden := hitIDs(pogung), 0

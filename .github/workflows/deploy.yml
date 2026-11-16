@@ -98,7 +98,7 @@ jobs:
       - if: steps.check.outputs.enabled == 'true'
         name: sqlc diff + generate
         run: |
-          sqlc() { docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/src" -w /src sqlc/sqlc:1.31.1 "$@"; }
+          sqlc() { docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/src" -w /src sqlc/sqlc:1.30.0 "$@"; } # same pin as Makefile SQLC_IMAGE (generated code header)
           sqlc vet
           sqlc diff
           sqlc generate

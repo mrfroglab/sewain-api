@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-// gradient is a deterministic test picture with some detail (not a flat colour).
+// gradient is a deterministic test picture with some detail (not a flat color).
 func gradient(w, h int) *image.RGBA {
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	for y := range h {
