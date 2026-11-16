@@ -11,20 +11,112 @@ import (
 // at every non-letter/digit (the plain whole-word match), and compacted (punctuation and invisible characters inside
 // a word removed, runs of single spaced letters joined), so "A.I.R.S.O.F.T", "air-soft", "a i r s o f t" or a
 // zero-width space do not hide a keyword, while words that merely contain it ("airy software") still pass.
+//
+// Each reading is also checked with simple leetspeak decoded inside words that contain a letter (0→o, 1→i or l, 3→e,
+// 4→a, 5→s, 7→t: "4irs0ft", "p1st0l") and with repeated letters collapsed ("kuuucing"; the keyword is collapsed the
+// same way). Numbers on their own ("tenda 4 orang", "500 W") are left alone.
 func BannedWordsIn(text string, banned []string) []string {
 	folded := foldKeywordText(text)
-	plain := " " + strings.Join(alnumWords(folded), " ") + " "
-	compact := " " + strings.Join(compactWords(folded), " ") + " "
+	plain := keywordVariants(alnumWords(folded))
+	compact := keywordVariants(compactWords(folded))
 	var out []string
 	for _, b := range banned {
 		words := alnumWords(foldKeywordText(b))
 		if len(words) == 0 {
 			continue
 		}
-		phrase, glued := " "+strings.Join(words, " ")+" ", " "+strings.Join(words, "")+" "
-		if strings.Contains(plain, phrase) || strings.Contains(compact, phrase) || strings.Contains(compact, glued) {
+		if matchKeyword(words, plain, compact) {
 			out = append(out, strings.ToLower(strings.TrimSpace(b)))
 		}
+	}
+	return out
+}
+
+// keywordText is one reading of a text as " w1 w2 … " (collapsed: repeated letters squeezed).
+type keywordText struct {
+	text      string
+	collapsed bool
+}
+
+func matchKeyword(words []string, plain, compact []keywordText) bool {
+	for _, collapsed := range []bool{false, true} {
+		kw := words
+		if collapsed {
+			kw = collapseWords(words)
+		}
+		phrase, glued := joinWords(kw), " "+strings.Join(kw, "")+" "
+		for _, p := range plain {
+			if p.collapsed == collapsed && strings.Contains(p.text, phrase) {
+				return true
+			}
+		}
+		for _, c := range compact {
+			if c.collapsed == collapsed && (strings.Contains(c.text, phrase) || strings.Contains(c.text, glued)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func joinWords(words []string) string { return " " + strings.Join(words, " ") + " " }
+
+// leetDigits are the digit-for-letter swaps decoded inside words (L3); '1' is tried as both i and l.
+var leetDigits = map[rune]rune{'0': 'o', '3': 'e', '4': 'a', '5': 's', '7': 't'}
+
+// keywordVariants returns the readings of a word list: as written and with leetspeak decoded (1 = i, 1 = l), each
+// also with repeated letters collapsed. Duplicates are dropped.
+func keywordVariants(words []string) []keywordText {
+	seen := map[keywordText]bool{}
+	var out []keywordText
+	add := func(ws []string) {
+		for _, v := range []keywordText{{joinWords(ws), false}, {joinWords(collapseWords(ws)), true}} {
+			if !seen[v] {
+				seen[v] = true
+				out = append(out, v)
+			}
+		}
+	}
+	add(words)
+	add(decodeLeet(words, 'i'))
+	add(decodeLeet(words, 'l'))
+	return out
+}
+
+func decodeLeet(words []string, one rune) []string {
+	out := make([]string, len(words))
+	for i, w := range words {
+		if strings.IndexFunc(w, func(r rune) bool { return r >= 'a' && r <= 'z' }) < 0 {
+			out[i] = w // a number on its own
+			continue
+		}
+		out[i] = strings.Map(func(r rune) rune {
+			if r == '1' {
+				return one
+			}
+			if to, ok := leetDigits[r]; ok {
+				return to
+			}
+			return r
+		}, w)
+	}
+	return out
+}
+
+// collapseWords squeezes runs of the same letter ("kuuucing" → "kucing").
+func collapseWords(words []string) []string {
+	out := make([]string, len(words))
+	for i, w := range words {
+		var b strings.Builder
+		var last rune
+		for _, r := range w {
+			if r == last && r >= 'a' && r <= 'z' {
+				continue
+			}
+			b.WriteRune(r)
+			last = r
+		}
+		out[i] = b.String()
 	}
 	return out
 }
