@@ -450,39 +450,47 @@ func (s *Service) ReadFile(ctx context.Context, v auth.Viewer, id, kind string) 
 
 // PurgeFiles deletes the files of submissions whose retention ended (files_purge_after <= now) and marks
 // them purged. The verification result (status, masked NIK, identity) is kept. Safe to run on several
-// instances concurrently (SKIP LOCKED). Returns the number of submissions purged.
+// instances concurrently (SKIP LOCKED). A submission whose files cannot be deleted is skipped for the rest
+// of the run, so it never blocks the others; its error is returned (joined) with the number purged.
 func (s *Service) PurgeFiles(ctx context.Context, now time.Time) (int, error) {
 	now = now.UTC().Truncate(time.Microsecond)
 	purged := 0
+	skip := []string{}
+	var errs []error
 	for {
-		n, err := s.purgeOne(ctx, now)
-		if err != nil {
-			return purged, err
+		id, ok, err := s.purgeOne(ctx, now, skip)
+		switch {
+		case err != nil && id == "":
+			return purged, errors.Join(append(errs, err)...)
+		case err != nil:
+			errs = append(errs, err)
+			skip = append(skip, id)
+		case !ok:
+			return purged, errors.Join(errs...)
+		default:
+			purged++
 		}
-		if !n {
-			return purged, nil
-		}
-		purged++
 	}
 }
 
-func (s *Service) purgeOne(ctx context.Context, now time.Time) (bool, error) {
+// purgeOne purges the oldest due submission not in skip. It returns the submission it worked on (if any).
+func (s *Service) purgeOne(ctx context.Context, now time.Time, skip []string) (string, bool, error) {
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 	defer tx.Rollback(ctx)
 	var id string
 	var ktp, selfie *string
 	err = tx.QueryRow(ctx, `
 		SELECT id, ktp_object, selfie_object FROM kyc_submissions
-		WHERE files_purged_at IS NULL AND files_purge_after <= $1
-		ORDER BY files_purge_after LIMIT 1 FOR UPDATE SKIP LOCKED`, now).Scan(&id, &ktp, &selfie)
+		WHERE files_purged_at IS NULL AND files_purge_after <= $1 AND NOT (id = ANY($2))
+		ORDER BY files_purge_after LIMIT 1 FOR UPDATE SKIP LOCKED`, now, skip).Scan(&id, &ktp, &selfie)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+		return "", false, nil
 	}
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 	for _, k := range []*string{ktp, selfie} {
 		if k == nil {
@@ -490,19 +498,19 @@ func (s *Service) purgeOne(ctx context.Context, now time.Time) (bool, error) {
 		}
 		if err := s.Blobs.Delete(ctx, *k); err != nil {
 			if ok, exErr := s.Blobs.Exists(ctx, *k); exErr != nil || ok {
-				return false, fmt.Errorf("kyc: purge %s: %w", *k, err)
+				return id, false, fmt.Errorf("kyc: purge %s: %w", *k, err)
 			}
 		}
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE kyc_submissions SET files_purged_at = $2, ktp_object = NULL, selfie_object = NULL, updated_at = $2
 		WHERE id = $1`, id, now); err != nil {
-		return false, err
+		return id, false, err
 	}
 	if err := s.Auditor.Audit(ctx, "system", "kyc.files.purge", "kyc_submission:"+id, nil, nil); err != nil {
-		return false, err
+		return id, false, err
 	}
-	return true, tx.Commit(ctx)
+	return id, true, tx.Commit(ctx)
 }
 
 // BlacklistNIK adds a NIK to the blacklist (admin). Future submissions and approvals with it are refused.

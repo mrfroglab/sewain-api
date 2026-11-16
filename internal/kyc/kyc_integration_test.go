@@ -539,3 +539,51 @@ func between(s, a, b string) string {
 	s = s[i+len(a):]
 	return s[:strings.Index(s, b)]
 }
+
+// stuckBlobs fails Delete (and still reports the object) for keys containing stuck.
+type stuckBlobs struct {
+	*kyctest.MemBlobStore
+	stuck string
+}
+
+func (s stuckBlobs) Delete(c context.Context, key string) error {
+	if strings.Contains(key, s.stuck) {
+		return errors.New("access denied")
+	}
+	return s.MemBlobStore.Delete(c, key)
+}
+
+// Finding K1: PurgeFiles always picked the oldest due submission and returned on the first error. One object
+// that cannot be deleted (permissions, object lock, a key the store rejects) therefore blocked the purge of
+// every later KTP and selfie forever, keeping identity documents past the 30-day policy (UU PDP).
+func TestPurgeContinuesPastAFailingSubmission(t *testing.T) {
+	f := newFixture(t)
+	a := f.submit(t, "u-a", nikA)
+	f.clock.Advance(time.Minute)
+	b := f.submit(t, "u-b", nikB)
+	for _, id := range []string{a.ID, b.ID} {
+		if _, err := f.svc.Decide(ctx, admin, id, "reject", "foto buram"); err != nil {
+			t.Fatal(err)
+		}
+		f.clock.Advance(time.Minute)
+	}
+	f.svc.Blobs = stuckBlobs{MemBlobStore: f.blobs, stuck: a.ID}
+	n, err := f.svc.PurgeFiles(ctx, t0.Add(kyc.FileRetention+time.Hour))
+	if err == nil || n != 1 {
+		t.Fatalf("PurgeFiles = %d, %v; want 1 purged and the stuck submission reported", n, err)
+	}
+	for k := range f.blobs.Snapshot() {
+		if strings.Contains(k, b.ID) {
+			t.Fatalf("blob %s of the healthy submission survived", k)
+		}
+	}
+	got, _ := f.svc.Get(ctx, admin, a.ID)
+	if got.FilesPurgedAt != nil {
+		t.Fatal("the stuck submission must not be marked purged")
+	}
+	// Once the store recovers, the next run finishes the job.
+	f.svc.Blobs = f.blobs
+	if n, err := f.svc.PurgeFiles(ctx, t0.Add(kyc.FileRetention+2*time.Hour)); err != nil || n != 1 {
+		t.Fatalf("second run = %d, %v", n, err)
+	}
+}
