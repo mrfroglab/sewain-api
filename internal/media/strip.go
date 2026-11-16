@@ -3,6 +3,7 @@ package media
 import (
 	"bytes"
 	"encoding/binary"
+	"math"
 )
 
 var (
@@ -57,7 +58,7 @@ func stripJPEG(data []byte) ([]byte, error) {
 		}
 		out = append(out, body...)
 	}
-	if orientation > 0 {
+	if orientation > 0 { // exifOrientation results are only kept for 2–8
 		seg := orientationSegment(orientation)
 		out = append(out[:insertAt], append(seg, out[insertAt:]...)...)
 	}
@@ -100,13 +101,16 @@ func exifOrientation(tiff []byte) int {
 
 // orientationSegment builds an APP1 EXIF segment holding only IFD0 with the Orientation tag.
 func orientationSegment(o int) []byte {
+	if o < 1 || o > 8 {
+		o = 1
+	}
 	tiff := []byte{'M', 'M', 0, 42, 0, 0, 0, 8, // header, IFD0 at offset 8
 		0, 1, // one entry
-		0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, byte(o), 0, 0, // Orientation SHORT ×1
+		0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, byte(o), 0, 0, // #nosec G115 -- o is 1–8; Orientation SHORT ×1
 		0, 0, 0, 0} // no next IFD
 	payload := append(append([]byte{}, exifHeader...), tiff...)
 	seg := []byte{0xFF, 0xE1, 0, 0}
-	binary.BigEndian.PutUint16(seg[2:], uint16(len(payload)+2))
+	binary.BigEndian.PutUint16(seg[2:], uint16(len(payload)+2)) // #nosec G115 -- fixed 34-byte payload
 	return append(seg, payload...)
 }
 
@@ -146,6 +150,9 @@ func stripWebP(data []byte) ([]byte, error) {
 		}
 		out = append(out, data[c.start:c.end]...)
 	}
-	binary.LittleEndian.PutUint32(out[4:], uint32(len(out)-8))
+	if len(out)-8 > math.MaxUint32 { // cannot happen below MaxUploadBytes, but RIFF sizes are 32 bit
+		return nil, errCorrupt
+	}
+	binary.LittleEndian.PutUint32(out[4:], uint32(len(out)-8)) // #nosec G115 -- range checked above
 	return out, nil
 }

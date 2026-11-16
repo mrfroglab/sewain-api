@@ -72,7 +72,7 @@ func normalizeName(s string) (string, error) {
 	return s, nil
 }
 
-func lockKey(tx pgx.Tx, ctx context.Context, key string) error {
+func lockKey(ctx context.Context, tx pgx.Tx, key string) error {
 	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, key)
 	return err
 }
@@ -145,12 +145,12 @@ func (s *Service) Submit(ctx context.Context, userID string, in SubmitInput) (Su
 	if err != nil {
 		return Submission{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	// Lock order: user, then NIK (same as Decide) so concurrent submissions cannot race past the checks.
-	if err := lockKey(tx, ctx, "kyc:user:"+userID); err != nil {
+	if err := lockKey(ctx, tx, "kyc:user:"+userID); err != nil {
 		return Submission{}, err
 	}
-	if err := lockKey(tx, ctx, "kyc:nik:"+hex.EncodeToString(hmac)); err != nil {
+	if err := lockKey(ctx, tx, "kyc:nik:"+hex.EncodeToString(hmac)); err != nil {
 		return Submission{}, err
 	}
 	if err := s.checkNIKAvailable(ctx, tx, userID, hmac, true); err != nil {
@@ -328,7 +328,7 @@ func (s *Service) Decide(ctx context.Context, v auth.Viewer, id, decision, reaso
 	if err != nil {
 		return Submission{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	var userID string
 	if err := tx.QueryRow(ctx, `SELECT user_id FROM kyc_submissions WHERE id = $1`, id).Scan(&userID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -336,7 +336,7 @@ func (s *Service) Decide(ctx context.Context, v auth.Viewer, id, decision, reaso
 		}
 		return Submission{}, err
 	}
-	if err := lockKey(tx, ctx, "kyc:user:"+userID); err != nil {
+	if err := lockKey(ctx, tx, "kyc:user:"+userID); err != nil {
 		return Submission{}, err
 	}
 	sub, err := s.decideTx(ctx, tx, v.UserID, id, status, reason)
@@ -362,7 +362,7 @@ func (s *Service) decideTx(ctx context.Context, tx pgx.Tx, actorID, id, status, 
 	}
 	now := s.now()
 	if status == StatusApproved {
-		if err := lockKey(tx, ctx, "kyc:nik:"+hex.EncodeToString(hmac)); err != nil {
+		if err := lockKey(ctx, tx, "kyc:nik:"+hex.EncodeToString(hmac)); err != nil {
 			return Submission{}, err
 		}
 		if err := s.checkNIKAvailable(ctx, tx, userID, hmac, false); err != nil {
@@ -419,7 +419,8 @@ func (s *Service) ReadFile(ctx context.Context, v auth.Viewer, id, kind string) 
 	// Audit every attempt, including unknown IDs and kinds, before touching any data.
 	target := "kyc_submission:" + truncate(id, 64) + "/" + truncate(kind, 16)
 	if err := s.Auditor.Audit(ctx, v.UserID, "kyc.file.read", target, nil, nil); err != nil {
-		log.Printf("kyc: audit file read %s by %s: %v", target, v.UserID, err)
+		// %q: id and kind come URL-decoded from the path and must not be able to forge log lines.
+		log.Printf("kyc: audit file read %q by %q: %v", target, v.UserID, err) // #nosec G706 -- %q escapes line breaks
 		return nil, "", errAuditFailed
 	}
 	if kind != FileKTP && kind != FileSelfie {
@@ -445,44 +446,60 @@ func (s *Service) ReadFile(ctx context.Context, v auth.Viewer, id, kind string) 
 	if err != nil {
 		return nil, "", fmt.Errorf("kyc: get %s: %w", *obj, err)
 	}
-	return s.openFile(id, kind, blob)
+	data, ct, err := s.openFile(id, kind, blob)
+	if err != nil {
+		return nil, "", err
+	}
+	// The type was sniffed and allow-listed at upload; re-check so the admin endpoint can never serve markup.
+	if !allowedTypes[ct] {
+		ct = "application/octet-stream"
+	}
+	return data, ct, nil
 }
 
 // PurgeFiles deletes the files of submissions whose retention ended (files_purge_after <= now) and marks
 // them purged. The verification result (status, masked NIK, identity) is kept. Safe to run on several
-// instances concurrently (SKIP LOCKED). Returns the number of submissions purged.
+// instances concurrently (SKIP LOCKED). A submission whose files cannot be deleted is skipped for the rest
+// of the run, so it never blocks the others; its error is returned (joined) with the number purged.
 func (s *Service) PurgeFiles(ctx context.Context, now time.Time) (int, error) {
 	now = now.UTC().Truncate(time.Microsecond)
 	purged := 0
+	skip := []string{}
+	var errs []error
 	for {
-		n, err := s.purgeOne(ctx, now)
-		if err != nil {
-			return purged, err
+		id, ok, err := s.purgeOne(ctx, now, skip)
+		switch {
+		case err != nil && id == "":
+			return purged, errors.Join(append(errs, err)...)
+		case err != nil:
+			errs = append(errs, err)
+			skip = append(skip, id)
+		case !ok:
+			return purged, errors.Join(errs...)
+		default:
+			purged++
 		}
-		if !n {
-			return purged, nil
-		}
-		purged++
 	}
 }
 
-func (s *Service) purgeOne(ctx context.Context, now time.Time) (bool, error) {
+// purgeOne purges the oldest due submission not in skip. It returns the submission it worked on (if any).
+func (s *Service) purgeOne(ctx context.Context, now time.Time, skip []string) (string, bool, error) {
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	var id string
 	var ktp, selfie *string
 	err = tx.QueryRow(ctx, `
 		SELECT id, ktp_object, selfie_object FROM kyc_submissions
-		WHERE files_purged_at IS NULL AND files_purge_after <= $1
-		ORDER BY files_purge_after LIMIT 1 FOR UPDATE SKIP LOCKED`, now).Scan(&id, &ktp, &selfie)
+		WHERE files_purged_at IS NULL AND files_purge_after <= $1 AND NOT (id = ANY($2))
+		ORDER BY files_purge_after LIMIT 1 FOR UPDATE SKIP LOCKED`, now, skip).Scan(&id, &ktp, &selfie)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+		return "", false, nil
 	}
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 	for _, k := range []*string{ktp, selfie} {
 		if k == nil {
@@ -490,19 +507,80 @@ func (s *Service) purgeOne(ctx context.Context, now time.Time) (bool, error) {
 		}
 		if err := s.Blobs.Delete(ctx, *k); err != nil {
 			if ok, exErr := s.Blobs.Exists(ctx, *k); exErr != nil || ok {
-				return false, fmt.Errorf("kyc: purge %s: %w", *k, err)
+				return id, false, fmt.Errorf("kyc: purge %s: %w", *k, err)
 			}
 		}
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE kyc_submissions SET files_purged_at = $2, ktp_object = NULL, selfie_object = NULL, updated_at = $2
 		WHERE id = $1`, id, now); err != nil {
-		return false, err
+		return id, false, err
 	}
 	if err := s.Auditor.Audit(ctx, "system", "kyc.files.purge", "kyc_submission:"+id, nil, nil); err != nil {
-		return false, err
+		return id, false, err
 	}
-	return true, tx.Commit(ctx)
+	return id, true, tx.Commit(ctx)
+}
+
+// EraseUser removes a user's identity data for account deletion (UU PDP): the encrypted KTP/selfie objects
+// of every submission, the submissions and the verified identity. The NIK blacklist is kept (it holds only
+// an HMAC and is what stops a blacklisted person from re-registering). Files are deleted before the rows,
+// so a failure leaves everything in place for a retry. Idempotent; returns the number of submissions
+// erased. Call it from the core's account deletion, after revoking sessions.
+func (s *Service) EraseUser(ctx context.Context, userID string) (int, error) {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockKey(ctx, tx, "kyc:user:"+userID); err != nil {
+		return 0, err
+	}
+	rows, err := tx.Query(ctx, `SELECT id, ktp_object, selfie_object FROM kyc_submissions WHERE user_id = $1 FOR UPDATE`, userID)
+	if err != nil {
+		return 0, err
+	}
+	var keys []string
+	n := 0
+	for rows.Next() {
+		var id string
+		var ktp, selfie *string
+		if err := rows.Scan(&id, &ktp, &selfie); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		n++
+		// Derive the keys too, in case a row lost its object column but the file is still there.
+		keys = append(keys, objectKey(id, FileKTP), objectKey(id, FileSelfie))
+		for _, k := range []*string{ktp, selfie} {
+			if k != nil && *k != objectKey(id, FileKTP) && *k != objectKey(id, FileSelfie) {
+				keys = append(keys, *k)
+			}
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, k := range keys {
+		if err := s.Blobs.Delete(ctx, k); err != nil {
+			if ok, exErr := s.Blobs.Exists(ctx, k); exErr != nil || ok {
+				return 0, fmt.Errorf("kyc: erase %s: %w", k, err)
+			}
+		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM identities WHERE user_id = $1`, userID); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM kyc_submissions WHERE user_id = $1`, userID); err != nil {
+		return 0, err
+	}
+	if n > 0 {
+		if err := s.Auditor.Audit(ctx, "system", "kyc.erase", "user:"+userID, nil, nil); err != nil {
+			return 0, fmt.Errorf("kyc: audit erase: %w", err)
+		}
+	}
+	return n, tx.Commit(ctx)
 }
 
 // BlacklistNIK adds a NIK to the blacklist (admin). Future submissions and approvals with it are refused.

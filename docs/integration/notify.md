@@ -148,7 +148,7 @@ klien refetch perubahan yang terlewat.
 Perilaku hub:
 
 - Batas 5 koneksi per user per instance (`MaxConnsPerUser`); koneksi ke-6 dapat HTTP 429 sebelum upgrade (klien web mundur
-  sendiri dengan backoff). Tamu tidak dibatasi kecuali `MaxGuestConns` diisi.
+  sendiri dengan backoff). Koneksi tamu dibatasi `MaxGuestConns` (0 = `DefaultMaxGuestConns` = 1000 per instance; nilai negatif = tanpa batas, jangan dipakai di produksi). Lihat temuan R1 di `docs/security/review-wave1.md`.
 - Ping tiap 25 detik, pong ditunggu 10 detik. Antrean kirim 16 pesan per koneksi; koneksi yang antreannya penuh
   atau menulis > 5 detik diputus. `Publish` tidak pernah menunggu klien.
 

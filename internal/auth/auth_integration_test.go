@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mrfroglab/sewain-api/internal/auth"
 	"github.com/mrfroglab/sewain-api/internal/auth/authtest"
+	"github.com/mrfroglab/sewain-api/internal/platform/middleware"
 )
 
 var t0 = time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
@@ -551,5 +552,72 @@ func TestAdminGrantAndRequireAdmin(t *testing.T) {
 	}
 	if _, err := auth.GrantAdmin(ctx, h.db, "081200000999"); err == nil {
 		t.Fatal("grant for unknown phone must fail")
+	}
+}
+
+// Finding A2 (with P1): the per-IP OTP limit counted exact address strings, so a client rotating addresses
+// inside its own IPv6 /64 could request codes for unlimited phone numbers (SMS/WhatsApp cost, "SMS
+// pumping"). IPv6 addresses are now counted per /64.
+func TestOTPPerIPLimitGroupsIPv6By64(t *testing.T) {
+	f := newFixture(t, auth.EchoSender{})
+	for i := 0; i < auth.OTPMaxPerIPHour; i++ {
+		f.request(t, fmt.Sprintf("08123400%04d", i), fmt.Sprintf("2001:db8:7:7::%x", i+1))
+	}
+	_, err := f.svc.RequestOTP(ctx, "081299990000", auth.RequestMeta{IP: "2001:db8:7:7:abcd::99"})
+	wantStatus(t, err, http.StatusTooManyRequests)
+	f.request(t, "081299990000", "2001:db8:7:8::1") // another /64 is another client
+}
+
+// Finding A4: docs/integration/ops.md promises that auth records the viewer with middleware.SetUserID, but
+// the middleware never did. Every ratelimit.ByUser limit (write, upload) therefore fell back to the client
+// IP, shared by a whole campus NAT, and access logs had no user id.
+func TestMiddlewareRecordsUserForPlatform(t *testing.T) {
+	f := newFixture(t, auth.EchoSender{})
+	v := f.login(t, "081233330000")
+	var got string
+	h := middleware.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = middleware.UserIDFrom(r.Context())
+	}), middleware.RequestID, f.svc.Middleware)
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/state", nil)
+	r.Header.Set("Authorization", "Bearer "+v.Token)
+	h.ServeHTTP(httptest.NewRecorder(), r)
+	if got != v.UserID {
+		t.Fatalf("middleware.UserIDFrom = %q, want %q", got, v.UserID)
+	}
+}
+
+// Finding A5a: with "Origin: null" (sandboxed iframe, cross-origin redirect chain, data: URL) the check fell
+// back to the Referer. The opaque origin is exactly the case where the browser hides the real initiator,
+// so null must be refused, not re-derived from a header the initiating context controls.
+func TestCSRFRejectsNullOrigin(t *testing.T) {
+	h := newHTTP(t)
+	tok := h.login(t, "081244440000").Token
+	hdr := map[string]string{"Cookie": auth.SessionCookieName + "=" + tok, "Origin": "null", "Referer": "https://sewain.example/akun"}
+	if resp, _ := h.do(t, "POST", "/api/v1/things", `{}`, hdr); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("Origin null + allowed Referer: %d, want 403", resp.StatusCode)
+	}
+}
+
+// Finding A5b: login CSRF. Requests without a session cookie skipped the Origin check, and the JSON decoder
+// ignores Content-Type, so a page on any site could auto-submit a text/plain form to /otp/verify with the
+// attacker's own phone and code and sign the victim's browser into the attacker's account (whatever the
+// victim then uploads, e.g. KTP photos, lands there). A browser always sends Origin on a cross-site POST, so
+// an Origin that is present but not allowed is now refused even without a cookie.
+func TestCSRFLoginFromForeignOriginRefused(t *testing.T) {
+	h := newHTTP(t)
+	_, out := h.do(t, "POST", "/api/v1/auth/otp/request", `{"phone":"081244440001"}`, nil)
+	body := `{"phone":"081244440001","code":"` + out["devCode"].(string) + `","acceptTerms":true,"x":"="}`
+	evil := map[string]string{"Origin": "https://evil.example", "Content-Type": "text/plain"}
+	resp, _ := h.do(t, "POST", "/api/v1/auth/otp/verify", body, evil)
+	if resp.StatusCode != http.StatusForbidden || sessionCookie(resp) != nil {
+		t.Fatalf("cross-site login: %d cookie=%v, want 403 without cookie", resp.StatusCode, sessionCookie(resp))
+	}
+	// Non-browser clients (no Origin) and the real web app still work.
+	if resp, _ := h.do(t, "POST", "/api/v1/auth/otp/verify", body, map[string]string{"Origin": "https://sewain.example"}); resp.StatusCode != 200 {
+		t.Fatalf("same-site login: %d", resp.StatusCode)
+	}
+	h.clock.Advance(auth.OTPResendGap)
+	if resp, _ := h.do(t, "POST", "/api/v1/auth/otp/request", `{"phone":"081244440002"}`, nil); resp.StatusCode != 200 {
+		t.Fatalf("request without Origin: %d", resp.StatusCode)
 	}
 }

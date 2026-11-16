@@ -50,6 +50,15 @@ func Watermark(src []byte, text string) ([]byte, error) {
 	if typ == "" {
 		return nil, errUnsupported
 	}
+	cfg, err := decodeConfig(typ, src)
+	if err != nil {
+		return nil, errCorrupt
+	}
+	if decodeCost(cfg) > MaxDecodeBytes {
+		return nil, errTooManyPixels
+	}
+	release := acquireDecode()
+	defer release()
 	img, err := decodeImage(typ, src)
 	if err != nil {
 		return nil, errCorrupt

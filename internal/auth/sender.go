@@ -212,7 +212,9 @@ func (z *ZenzivaSender) post(ctx context.Context, endpoint string, msg OTPMessag
 		}
 		body, ctype = strings.NewReader(form.Encode()), "application/x-www-form-urlencoded"
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, body)
+	// endpoint is ZENZIVA_WA_URL/ZENZIVA_SMS_URL from the operator's environment (validated http(s) URLs),
+	// never from a request.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, body) // #nosec G704 -- operator-configured URL
 	if err != nil {
 		return err
 	}
@@ -224,7 +226,7 @@ func (z *ZenzivaSender) post(ctx context.Context, endpoint string, msg OTPMessag
 	case "bearer":
 		req.Header.Set("Authorization", "Bearer "+z.cfg.UserKey)
 	}
-	resp, err := z.client.Do(req)
+	resp, err := z.client.Do(req) // #nosec G704 -- operator-configured URL, see above
 	if err != nil {
 		return err // url.Error carries the endpoint but never the credentials (they are in the body/header)
 	}
