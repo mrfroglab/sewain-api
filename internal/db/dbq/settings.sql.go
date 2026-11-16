@@ -36,7 +36,7 @@ type ClaimIdempotencyKeyParams struct {
 	Action      string
 	RequestHash string
 	Status      int
-	Response    json.RawMessage
+	Response    string
 }
 
 // ------------------------------------------------------------- idempotency
@@ -61,7 +61,7 @@ UPDATE idempotency_keys SET status = $1, response = $2 WHERE user_id = $3 AND ke
 
 type CompleteIdempotencyKeyParams struct {
 	Status   int
-	Response json.RawMessage
+	Response string
 	UserID   string
 	Key      string
 }

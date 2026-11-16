@@ -536,7 +536,7 @@ CREATE TABLE idempotency_keys (
   action       text NOT NULL,
   request_hash text NOT NULL,
   status       integer NOT NULL,
-  response     jsonb NOT NULL,
+  response     text NOT NULL, -- the exact response body (byte-identical replays)
   created_at   timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (user_id, key)
 );

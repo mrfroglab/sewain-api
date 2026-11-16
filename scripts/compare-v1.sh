@@ -82,6 +82,20 @@ if ! diff -u "$WORK/v1.norm.json" "$WORK/v2.norm.json" >"$WORK/diff.txt"; then
 fi
 echo "✓ /api/v1/state identik (v1 $REF vs v2, scope full, $(wc -c <"$WORK/v2.json") byte)"
 
+# Search: same hits (ids, order) and hidden count for the queries of sewain-web/e2e/api.mjs. Distances are rounded
+# to 100 m in v2 (FR-S6), so only ids are compared.
+for qs in "lat=-7.7713&lng=110.3776&radiusKm=3" "lat=-7.7596&lng=110.3727&radiusKm=3" \
+  "lat=-7.7713&lng=110.3776&radiusKm=5&kategori=kamera&jaminan=cukup-identitas" "lat=-7.7713&lng=110.3776&radiusKm=5&penyedia=toko&min=10000&max=50000"; do
+  # (v1 cannot answer `serah=…`: its jsonb `?` operator clashes with the query placeholders. Fixed in v2.)
+  # v1 leaves ties (listings at the same point) in arbitrary order; v2 breaks them by id.
+  a="$(curl -s "http://127.0.0.1:$P1/api/v1/listings/search?$qs" | jq -c '[[.hits | sort_by([(.distanceKm*1e6|round), .id])[] | .id], .hiddenByProviderReach]')"
+  b="$(curl -s "http://127.0.0.1:$P2/api/v1/listings/search?$qs" | jq -c '[[.hits[].id], .hiddenByProviderReach]')"
+  if [ "$a" != "$b" ]; then
+    echo "✗ search beda untuk $qs"; echo "  v1: $a"; echo "  v2: $b"; exit 1
+  fi
+done
+echo "✓ pencarian identik (4 query e2e)"
+
 # Upgrade: stop v1 and start v2 on the database v1 created (v1 JSONB schema) → migration 00001 + re-seed.
 kill "${PIDS[0]}"; wait "${PIDS[0]}" 2>/dev/null || true; PIDS[0]=""
 P3="${V2_UPGRADE_PORT:-18733}"

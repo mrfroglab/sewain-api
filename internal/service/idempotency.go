@@ -51,7 +51,7 @@ func (s *Service) DispatchIdempotent(ctx context.Context, viewer *Viewer, key, r
 		if prev.RequestHash != requestHash {
 			return StoredResponse{}, false, ErrIdempotencyMismatch
 		}
-		return StoredResponse{Status: prev.Status, Body: prev.Response}, true, nil
+		return StoredResponse{Status: prev.Status, Body: json.RawMessage(prev.Response)}, true, nil
 	}
 	if out, ok, err := get(s.q); err == nil || !db.IsNotFound(err) {
 		return out, ok, err
@@ -61,7 +61,7 @@ func (s *Service) DispatchIdempotent(ctx context.Context, viewer *Viewer, key, r
 	var replayed bool
 	_, err := s.run(ctx, func(t *txn) error {
 		n, err := t.q.ClaimIdempotencyKey(t.ctx, dbq.ClaimIdempotencyKeyParams{UserID: userID, Key: key, Action: name, RequestHash: requestHash,
-			Status: 0, Response: json.RawMessage(`null`)})
+			Status: 0, Response: "null"})
 		if !t.check(err) {
 			return nil
 		}
@@ -88,7 +88,7 @@ func (s *Service) DispatchIdempotent(ctx context.Context, viewer *Viewer, key, r
 		}
 		status, body := respond(res, nil)
 		out = StoredResponse{Status: status, Body: body}
-		t.check(t.q.CompleteIdempotencyKey(t.ctx, dbq.CompleteIdempotencyKeyParams{UserID: userID, Key: key, Status: status, Response: body}))
+		t.check(t.q.CompleteIdempotencyKey(t.ctx, dbq.CompleteIdempotencyKeyParams{UserID: userID, Key: key, Status: status, Response: string(body)}))
 		return nil
 	})
 	if err == nil {
@@ -108,7 +108,7 @@ func (s *Service) DispatchIdempotent(ctx context.Context, viewer *Viewer, key, r
 	out = StoredResponse{Status: status, Body: body}
 	err = db.WithTx(ctx, s.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		q := dbq.New(tx)
-		n, err := q.ClaimIdempotencyKey(ctx, dbq.ClaimIdempotencyKeyParams{UserID: userID, Key: key, Action: name, RequestHash: requestHash, Status: status, Response: body})
+		n, err := q.ClaimIdempotencyKey(ctx, dbq.ClaimIdempotencyKeyParams{UserID: userID, Key: key, Action: name, RequestHash: requestHash, Status: status, Response: string(body)})
 		if err != nil || n > 0 {
 			return err
 		}

@@ -227,7 +227,7 @@ type IdempotencyKey struct {
 	Action      string
 	RequestHash string
 	Status      int
-	Response    json.RawMessage
+	Response    string
 	CreatedAt   time.Time
 }
 
