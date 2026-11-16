@@ -3,7 +3,24 @@ GO ?= $(if $(shell command -v go 2>/dev/null),go,scripts/go.sh)
 include $(wildcard .env)
 export
 
-.PHONY: run build test test-integration vet fmt db-up db-down db-reset seed-export
+.PHONY: run build test test-integration vet fmt db-up db-down db-reset seed-export generate generate-check migrate migrate-status
+
+# sqlc lewat image Docker resmi yang dipin: internal/db/queries + migrasi → internal/db/dbq (hasil di-commit).
+SQLC_IMAGE ?= sqlc/sqlc:1.30.0
+SQLC = docker run --rm -v "$(CURDIR)":/src -w /src --user "$$(id -u):$$(id -g)" $(SQLC_IMAGE)
+
+generate:
+	$(SQLC) generate
+
+# Gagal kalau kode hasil generate yang di-commit sudah basi (untuk CI).
+generate-check:
+	$(SQLC) diff
+
+migrate:
+	$(GO) run ./cmd/api migrate up
+
+migrate-status:
+	$(GO) run ./cmd/api migrate status
 
 run:
 	$(GO) run ./cmd/api
