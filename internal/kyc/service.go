@@ -72,7 +72,7 @@ func normalizeName(s string) (string, error) {
 	return s, nil
 }
 
-func lockKey(tx pgx.Tx, ctx context.Context, key string) error {
+func lockKey(ctx context.Context, tx pgx.Tx, key string) error {
 	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, key)
 	return err
 }
@@ -145,12 +145,12 @@ func (s *Service) Submit(ctx context.Context, userID string, in SubmitInput) (Su
 	if err != nil {
 		return Submission{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	// Lock order: user, then NIK (same as Decide) so concurrent submissions cannot race past the checks.
-	if err := lockKey(tx, ctx, "kyc:user:"+userID); err != nil {
+	if err := lockKey(ctx, tx, "kyc:user:"+userID); err != nil {
 		return Submission{}, err
 	}
-	if err := lockKey(tx, ctx, "kyc:nik:"+hex.EncodeToString(hmac)); err != nil {
+	if err := lockKey(ctx, tx, "kyc:nik:"+hex.EncodeToString(hmac)); err != nil {
 		return Submission{}, err
 	}
 	if err := s.checkNIKAvailable(ctx, tx, userID, hmac, true); err != nil {
@@ -328,7 +328,7 @@ func (s *Service) Decide(ctx context.Context, v auth.Viewer, id, decision, reaso
 	if err != nil {
 		return Submission{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	var userID string
 	if err := tx.QueryRow(ctx, `SELECT user_id FROM kyc_submissions WHERE id = $1`, id).Scan(&userID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -336,7 +336,7 @@ func (s *Service) Decide(ctx context.Context, v auth.Viewer, id, decision, reaso
 		}
 		return Submission{}, err
 	}
-	if err := lockKey(tx, ctx, "kyc:user:"+userID); err != nil {
+	if err := lockKey(ctx, tx, "kyc:user:"+userID); err != nil {
 		return Submission{}, err
 	}
 	sub, err := s.decideTx(ctx, tx, v.UserID, id, status, reason)
@@ -362,7 +362,7 @@ func (s *Service) decideTx(ctx context.Context, tx pgx.Tx, actorID, id, status, 
 	}
 	now := s.now()
 	if status == StatusApproved {
-		if err := lockKey(tx, ctx, "kyc:nik:"+hex.EncodeToString(hmac)); err != nil {
+		if err := lockKey(ctx, tx, "kyc:nik:"+hex.EncodeToString(hmac)); err != nil {
 			return Submission{}, err
 		}
 		if err := s.checkNIKAvailable(ctx, tx, userID, hmac, false); err != nil {
@@ -419,7 +419,8 @@ func (s *Service) ReadFile(ctx context.Context, v auth.Viewer, id, kind string) 
 	// Audit every attempt, including unknown IDs and kinds, before touching any data.
 	target := "kyc_submission:" + truncate(id, 64) + "/" + truncate(kind, 16)
 	if err := s.Auditor.Audit(ctx, v.UserID, "kyc.file.read", target, nil, nil); err != nil {
-		log.Printf("kyc: audit file read %s by %s: %v", target, v.UserID, err)
+		// %q: id and kind come URL-decoded from the path and must not be able to forge log lines.
+		log.Printf("kyc: audit file read %q by %q: %v", target, v.UserID, err)
 		return nil, "", errAuditFailed
 	}
 	if kind != FileKTP && kind != FileSelfie {
@@ -445,7 +446,15 @@ func (s *Service) ReadFile(ctx context.Context, v auth.Viewer, id, kind string) 
 	if err != nil {
 		return nil, "", fmt.Errorf("kyc: get %s: %w", *obj, err)
 	}
-	return s.openFile(id, kind, blob)
+	data, ct, err := s.openFile(id, kind, blob)
+	if err != nil {
+		return nil, "", err
+	}
+	// The type was sniffed and allow-listed at upload; re-check so the admin endpoint can never serve markup.
+	if !allowedTypes[ct] {
+		ct = "application/octet-stream"
+	}
+	return data, ct, nil
 }
 
 // PurgeFiles deletes the files of submissions whose retention ended (files_purge_after <= now) and marks
@@ -479,7 +488,7 @@ func (s *Service) purgeOne(ctx context.Context, now time.Time, skip []string) (s
 	if err != nil {
 		return "", false, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	var id string
 	var ktp, selfie *string
 	err = tx.QueryRow(ctx, `
@@ -523,8 +532,8 @@ func (s *Service) EraseUser(ctx context.Context, userID string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback(ctx)
-	if err := lockKey(tx, ctx, "kyc:user:"+userID); err != nil {
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockKey(ctx, tx, "kyc:user:"+userID); err != nil {
 		return 0, err
 	}
 	rows, err := tx.Query(ctx, `SELECT id, ktp_object, selfie_object FROM kyc_submissions WHERE user_id = $1 FOR UPDATE`, userID)
