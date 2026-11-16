@@ -116,13 +116,13 @@ func TestFakeTokenFloodStopsBeforeAuth(t *testing.T) {
 	reachedAuth, limited := 0, 0
 	for i := range 60 {
 		r := flood(i)
-		switch {
-		case r.Status == http.StatusTooManyRequests:
+		switch r.Status {
+		case http.StatusTooManyRequests:
 			limited++
 			if r.Header.Get("Set-Cookie") != "" {
 				t.Fatalf("request %d was refused after the session lookup: %v", i, r.Header)
 			}
-		case r.Status == http.StatusOK:
+		case http.StatusOK:
 			if i%2 == 0 && !strings.HasPrefix(r.Header.Get("Set-Cookie"), "sewain_session=;") {
 				t.Fatalf("request %d with a fake cookie did not reach auth: %v", i, r.Header)
 			}

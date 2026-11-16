@@ -33,7 +33,7 @@ func (s *Service) SnapshotScope() string {
 }
 
 // viewerVersionSQL is the latest change_log version relevant to a viewer: every change for admins and scope "full"
-// ($1), otherwise public changes plus the ones naming the user ($2, '' for guests). Every write that changes what a
+// ($1), otherwise public changes plus the ones naming the user ($2, ” for guests). Every write that changes what a
 // viewer sees touches that viewer or marks the change public (txn.touch/touchPublic), which is what the realtime
 // feed relies on too. When the viewer's rows were pruned (Housekeeping) the oldest kept version stands in: it only
 // grows, so an ETag never comes back to an older value after something changed.

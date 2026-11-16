@@ -18,20 +18,20 @@ const (
 	MaxMeterLen       = 50   // odometer / fuel reading
 )
 
-// CheckLen refuses a text longer than max characters: "<label> terlalu panjang (maks N karakter)."
-func CheckLen(label, s string, max int) error {
-	if utf8.RuneCountInString(s) > max {
-		return Fail(fmt.Sprintf("%s terlalu panjang (maks %d karakter).", label, max))
+// CheckLen refuses a text longer than limit characters: "<label> terlalu panjang (maks N karakter)."
+func CheckLen(label, s string, limit int) error {
+	if utf8.RuneCountInString(s) > limit {
+		return Fail(fmt.Sprintf("%s terlalu panjang (maks %d karakter).", label, limit))
 	}
 	return nil
 }
 
 // CheckLenPtr is CheckLen for an optional text.
-func CheckLenPtr(label string, s *string, max int) error {
+func CheckLenPtr(label string, s *string, limit int) error {
 	if s == nil {
 		return nil
 	}
-	return CheckLen(label, *s, max)
+	return CheckLen(label, *s, limit)
 }
 
 // FirstErr returns the first non-nil error.

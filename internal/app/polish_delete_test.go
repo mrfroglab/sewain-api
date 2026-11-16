@@ -37,7 +37,7 @@ func TestDeleteAccountBlockedUntilSettled(t *testing.T) {
 	}
 	a.OK(maya, "cancelBooking", "u-maya", bm, "Tidak jadi")
 	if r := del(maya); r.Status != 200 {
-		t.Fatalf("delete after cancelling: %d %s", r.Status, r.Raw)
+		t.Fatalf("delete after canceling: %d %s", r.Status, r.Raw)
 	}
 
 	// Dimas rents, the item is handed over, he opens a dispute: blocked (dispute message) until the admin resolves it.
