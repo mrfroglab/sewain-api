@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/mrfroglab/sewain-api/internal/crypto"
+	"github.com/mrfroglab/sewain-api/internal/platform/ratelimit"
 )
 
 // PurposeLogin is the only OTP purpose: it signs in and registers in one step.
@@ -40,7 +42,9 @@ func (s *Service) RequestOTP(ctx context.Context, rawPhone string, meta RequestM
 	if err != nil {
 		return RequestResult{}, err
 	}
-	ip := truncate(meta.IP, 64)
+	// The per-IP limit counts IPv6 clients per /64 (one subscriber owns the whole prefix), so the column
+	// holds the /64 for IPv6 and the address for IPv4.
+	ip := truncate(ratelimit.IPBucket(strings.TrimSpace(meta.IP)), 64)
 
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {

@@ -553,3 +553,16 @@ func TestAdminGrantAndRequireAdmin(t *testing.T) {
 		t.Fatal("grant for unknown phone must fail")
 	}
 }
+
+// Finding A2 (with P1): the per-IP OTP limit counted exact address strings, so a client rotating addresses
+// inside its own IPv6 /64 could request codes for unlimited phone numbers (SMS/WhatsApp cost, "SMS
+// pumping"). IPv6 addresses are now counted per /64.
+func TestOTPPerIPLimitGroupsIPv6By64(t *testing.T) {
+	f := newFixture(t, auth.EchoSender{})
+	for i := 0; i < auth.OTPMaxPerIPHour; i++ {
+		f.request(t, fmt.Sprintf("08123400%04d", i), fmt.Sprintf("2001:db8:7:7::%x", i+1))
+	}
+	_, err := f.svc.RequestOTP(ctx, "081299990000", auth.RequestMeta{IP: "2001:db8:7:7:abcd::99"})
+	wantStatus(t, err, http.StatusTooManyRequests)
+	f.request(t, "081299990000", "2001:db8:7:8::1") // another /64 is another client
+}
