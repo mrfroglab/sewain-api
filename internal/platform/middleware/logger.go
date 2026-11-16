@@ -36,11 +36,15 @@ func Logger(log *slog.Logger, opts LoggerOptions) func(http.Handler) http.Handle
 			}
 			start := time.Now()
 			rec := newRecorder(w)
-			defer func() {
+			completed := false
+			defer func() { // also runs while a panic unwinds (Recover placed outside Logger)
 				if opts.Skip != nil && opts.Skip(r) {
 					return
 				}
 				status := rec.Status()
+				if !completed {
+					status = http.StatusInternalServerError
+				}
 				level := slog.LevelInfo
 				switch {
 				case status >= 500:
@@ -65,6 +69,7 @@ func Logger(log *slog.Logger, opts LoggerOptions) func(http.Handler) http.Handle
 				)
 			}()
 			next.ServeHTTP(rec, r)
+			completed = true
 		})
 	}
 }
