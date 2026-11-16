@@ -200,9 +200,14 @@ func (s *Server) signedSrc(ctx context.Context, viewer *service.Viewer, id, fall
 	return fallback
 }
 
-// demoPhoto registers a bundled sample image ("Pakai foto contoh") as evidence, hashed by the server. The photo
-// keeps its static /img/… URL (no stored object).
+// demoPhoto registers a bundled sample image ("Pakai foto contoh") as evidence, hashed by the server (DEMO_MODE only).
+// The photo keeps its static /img/… URL (no stored object).
 func (s *Server) demoPhoto(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.DemoMode {
+		// Outside the demo, evidence must be a real upload (FR-P2): no stock pictures with a server timestamp.
+		writeErr(w, http.StatusForbidden, "Foto contoh hanya tersedia di DEMO_MODE.")
+		return
+	}
 	viewer := viewerOf(r)
 	if viewer == nil {
 		writeErr(w, http.StatusUnauthorized, "Masuk dulu.")
