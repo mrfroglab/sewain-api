@@ -151,8 +151,18 @@ func TestSnapshotPrivacy(t *testing.T) {
 	if len(guest.Bookings)+len(guest.Messages)+len(guest.Photos)+len(guest.Notifications)+len(guest.Verifications)+len(guest.Disputes) != 0 {
 		t.Fatal("guest must not see private data")
 	}
-	if len(guest.Listings) == 0 || len(guest.Users) != len(full.Users) || guest.Commission.Mode == "" {
+	if len(guest.Listings) == 0 || len(guest.Users) == 0 || guest.Commission.Mode == "" {
 		t.Fatal("guest must still see listings, public profiles and configuration")
+	}
+	// SNAPSHOT_USERS=referenced (default): every listing owner's public profile is there.
+	guestUsers := map[string]bool{}
+	for _, u := range guest.Users {
+		guestUsers[u.ID] = true
+	}
+	for _, l := range guest.Listings {
+		if !guestUsers[l.OwnerID] {
+			t.Fatalf("guest snapshot misses the owner %s of %s", l.OwnerID, l.ID)
+		}
 	}
 
 	raka := check("u-raka", &service.Viewer{UserID: "u-raka", Role: "user"})

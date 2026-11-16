@@ -36,7 +36,8 @@ const (
 type Options struct {
 	DemoMode      bool
 	SnapshotScope string
-	// SnapshotUsers: SnapshotUsersAll (default) or SnapshotUsersReferenced (config.Config.SnapshotUsers).
+	// SnapshotUsers: SnapshotUsersReferenced (default, empty) or SnapshotUsersAll (config.Config.SnapshotUsers). With
+	// referenced, DEMO_MODE snapshots also carry every demo persona.
 	SnapshotUsers string
 	// PaymentMode: simulated | offline | gateway. Empty = simulated with DEMO_MODE, offline otherwise.
 	PaymentMode string

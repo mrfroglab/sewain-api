@@ -236,8 +236,18 @@ func (s *Service) buildSnapshot(ctx context.Context, tx pgx.Tx, viewer *Viewer, 
 	// Users last: with SNAPSHOT_USERS=referenced a scoped snapshot only carries the profiles the rest of it points
 	// at, which keeps its size and cost independent of the number of accounts.
 	var ids []string
-	if !all && s.opt.SnapshotUsers == SnapshotUsersReferenced {
+	if !all && s.opt.SnapshotUsers != SnapshotUsersAll {
 		ids = referencedUsers(d, me)
+		if s.opt.DemoMode {
+			// The persona picker and the Demo panel list every demo account, referenced or not.
+			rows, err := tx.Query(ctx, `SELECT id FROM users WHERE demo IS NOT NULL AND deleted_at IS NULL`)
+			if r.ok(err) {
+				demo, err := pgx.CollectRows(rows, pgx.RowTo[string])
+				if r.ok(err) {
+					ids = mergeIDs(ids, demo)
+				}
+			}
+		}
 	}
 	s.loadUsers(r, d, all, me, now, ids)
 	if r.err != nil {
@@ -327,6 +337,20 @@ func referencedUsers(d *domain.Data, me string) []string {
 	}
 	for _, v := range d.Verifications {
 		add(v.UserID)
+	}
+	out := make([]string, 0, len(set))
+	for id := range set {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// mergeIDs returns the sorted union of two id lists.
+func mergeIDs(a, b []string) []string {
+	set := make(map[string]bool, len(a)+len(b))
+	for _, id := range append(append([]string{}, a...), b...) {
+		set[id] = true
 	}
 	out := make([]string, 0, len(set))
 	for id := range set {

@@ -36,9 +36,10 @@ type Config struct {
 	CORSOrigins []string
 	// SnapshotScope: "scoped" (default, per viewer, ROADMAP §4) or "full" (v1 behavior, DEMO_MODE only).
 	SnapshotScope string
-	// SnapshotUsers: which public profiles a scoped (non-admin) snapshot carries. "all" (default) = every user;
-	// "referenced" = only users the rest of the viewer's snapshot points at (listing owners, booking parties,
-	// review authors/targets, wanted board, ...). See docs/loadtest/2026-11-report.md.
+	// SnapshotUsers: which public profiles a scoped (non-admin) snapshot carries. "referenced" (default) = only
+	// users the rest of the viewer's snapshot points at (listing owners, booking parties, review authors/targets,
+	// wanted board, ...), plus every demo persona in DEMO_MODE; "all" = every user. See
+	// docs/loadtest/2026-11-report.md.
 	SnapshotUsers string
 	// MigrateOnStart applies pending goose migrations at startup (under an advisory lock). Default true.
 	MigrateOnStart bool
@@ -83,7 +84,7 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 		UploadDir:      get("UPLOAD_DIR", "./data/uploads"),
 		WebOrigin:      strings.TrimRight(get("WEB_ORIGIN", "http://localhost:3000"), "/"),
 		SnapshotScope:  get("SNAPSHOT_SCOPE", "scoped"),
-		SnapshotUsers:  get("SNAPSHOT_USERS", "all"),
+		SnapshotUsers:  get("SNAPSHOT_USERS", "referenced"),
 		MigrateOnStart: get("MIGRATE_ON_START", "true") != "false",
 		PaymentMode:    get("PAYMENT_MODE", ""),
 		MetricsAddr:    get("METRICS_ADDR", "127.0.0.1:9090"),
