@@ -464,11 +464,12 @@ func (t *txn) sendMessage(senderID, id domain.ID, text *string, photoID *domain.
 
 // markThreadRead stores when the user last read a booking chat. Unknown bookings are ignored.
 func (t *txn) markThreadRead(userID, bookingID domain.ID) error {
-	if b := t.booking(bookingID); b == nil {
+	b := t.booking(bookingID)
+	if b == nil || (!domain.IsParty(b, userID, "any") && !t.isAdmin(userID)) {
 		return nil
 	}
 	t.check(t.q.UpsertChatRead(t.ctx, dbq.UpsertChatReadParams{UserID: userID, BookingID: bookingID, ReadAt: tsOf(t.now)}))
-	t.touch(userID)
+	t.touch(b.RenterID, b.ProviderID) // both parties see both read markers ("Dibaca")
 	return nil
 }
 
