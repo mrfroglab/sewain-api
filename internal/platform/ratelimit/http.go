@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"time"
 
@@ -14,10 +15,27 @@ import (
 // KeyFunc derives the bucket key for a request. Returning "" skips limiting for that request.
 type KeyFunc func(r *http.Request) string
 
-// ByIP keys on the client IP resolved by middleware.RealIP (falling back to RemoteAddr).
+// IPBucket returns the rate-limit identity of a client address: IPv4 (and IPv4-mapped IPv6) addresses as
+// they are, IPv6 addresses as their /64 ("2001:db8:a:b::/64"). A single IPv6 subscriber or VPS routinely
+// owns a whole /64, so keying on the full address would hand an attacker 2^64 fresh buckets. Values that
+// do not parse as an address are returned unchanged.
+func IPBucket(ip string) string {
+	a, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	a = a.Unmap().WithZone("")
+	if a.Is4() {
+		return a.String()
+	}
+	return netip.PrefixFrom(a, 64).Masked().String()
+}
+
+// ByIP keys on the client IP resolved by middleware.RealIP (falling back to RemoteAddr), grouping IPv6
+// clients by /64 (see IPBucket).
 func ByIP(r *http.Request) string {
 	if ip := middleware.ClientIPFrom(r.Context()); ip != "" {
-		return "ip:" + ip
+		return "ip:" + IPBucket(ip)
 	}
 	return "ip:" + r.RemoteAddr
 }
