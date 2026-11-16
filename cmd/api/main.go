@@ -1,9 +1,16 @@
-// Command api runs the Sewain backend (PRD §13): Go + Postgres/PostGIS, WebSocket change feed, photo evidence.
+// Command api runs the Sewain backend (PRD §13): Go + Postgres/PostGIS, transactional services, WebSocket change
+// feed, photo evidence.
+//
+//	api                  serve (migrations run at start under an advisory lock)
+//	api migrate [up]     apply pending migrations and exit
+//	api migrate status   list migrations
+//	api healthcheck      Docker HEALTHCHECK (distroless has no shell or curl)
 package main
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -12,13 +19,12 @@ import (
 	"time"
 
 	"github.com/mrfroglab/sewain-api/internal/config"
-	"github.com/mrfroglab/sewain-api/internal/domain"
+	"github.com/mrfroglab/sewain-api/internal/db"
 	"github.com/mrfroglab/sewain-api/internal/httpapi"
-	"github.com/mrfroglab/sewain-api/internal/store"
+	"github.com/mrfroglab/sewain-api/internal/service"
 )
 
 func main() {
-	// "api healthcheck" is used by the Docker HEALTHCHECK (distroless has no shell or curl).
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
 		port := os.Getenv("PORT")
 		if port == "" {
@@ -32,10 +38,45 @@ func main() {
 		os.Exit(0)
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	if err := run(log); err != nil {
+	var err error
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		err = migrate(os.Args[2:])
+	} else {
+		err = run(log)
+	}
+	if err != nil {
 		log.Error("fatal", "err", err)
 		os.Exit(1)
 	}
+}
+
+func migrate(args []string) error {
+	url := os.Getenv("DATABASE_URL")
+	if url == "" {
+		return errors.New("DATABASE_URL is required")
+	}
+	ctx := context.Background()
+	pool, err := db.Open(ctx, url)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	cmd := "up"
+	if len(args) > 0 {
+		cmd = args[0]
+	}
+	switch cmd {
+	case "up":
+		n, err := db.Migrate(ctx, pool)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("applied %d migration(s)\n", n)
+		return nil
+	case "status":
+		return db.MigrationStatus(ctx, pool, os.Stdout)
+	}
+	return fmt.Errorf("unknown migrate command %q (use up | status)", cmd)
 }
 
 func run(log *slog.Logger) error {
@@ -46,37 +87,28 @@ func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	var db *store.Store
-	for attempt := 1; ; attempt++ { // wait for Postgres on cold start
-		db, err = store.Open(ctx, cfg.DatabaseURL)
-		if err == nil || attempt >= 30 {
-			break
-		}
+	pool, err := db.OpenWithRetry(ctx, cfg.DatabaseURL, 30, 2*time.Second, func(attempt int) {
 		log.Info("waiting for database", "attempt", attempt)
-		time.Sleep(2 * time.Second)
-	}
+	})
 	if err != nil {
 		return err
 	}
-	defer db.Close()
-	if err := db.Migrate(ctx); err != nil {
-		return err
-	}
-	data, err := db.Load(ctx)
-	if err != nil {
-		return err
-	}
-	eng := domain.NewEngine(&domain.Data{})
-	srv := httpapi.New(cfg, eng, db, log)
-	if data == nil {
-		log.Info("empty database: seeding demo data")
-		if err := srv.Seed(ctx); err != nil {
-			return err
+	defer pool.Close()
+	if cfg.MigrateOnStart {
+		n, err := db.Migrate(ctx, pool)
+		if err != nil {
+			return fmt.Errorf("migrate: %w", err)
 		}
-	} else {
-		eng.Replace(data)
+		log.Info("migrations applied", "count", n)
 	}
-	go srv.RunTicker(ctx, 15*time.Second)
+	svc := service.New(pool, service.Options{DemoMode: cfg.DemoMode, SnapshotScope: cfg.SnapshotScope, Log: log})
+	if seeded, err := svc.SeedIfEmpty(ctx); err != nil {
+		return fmt.Errorf("seed: %w", err)
+	} else if seeded {
+		log.Info("empty database: demo data seeded")
+	}
+	srv := httpapi.New(cfg, svc, log)
+	go svc.RunScheduler(ctx, 15*time.Second)
 
 	httpSrv := &http.Server{Addr: ":" + cfg.Port, Handler: srv.Routes(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
@@ -85,7 +117,7 @@ func run(log *slog.Logger) error {
 		defer cancel()
 		_ = httpSrv.Shutdown(sctx)
 	}()
-	log.Info("sewain-api listening", "port", cfg.Port, "env", cfg.AppEnv, "demoMode", cfg.DemoMode)
+	log.Info("sewain-api listening", "port", cfg.Port, "env", cfg.AppEnv, "demoMode", cfg.DemoMode, "snapshotScope", svc.SnapshotScope())
 	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
