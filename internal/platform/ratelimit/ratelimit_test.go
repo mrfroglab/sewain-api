@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -189,6 +191,67 @@ func TestProfiles(t *testing.T) {
 	for _, p := range Profiles() {
 		if p.Rate.Limit != want[p.Name] || p.Rate.Per != time.Minute || p.Key == nil {
 			t.Errorf("profile %s: %+v", p.Name, p.Rate)
+		}
+	}
+}
+
+// Finding P1: ByIP keyed on the full address. One IPv6 customer gets a whole /64 (2^64 addresses), so an
+// attacker rotating the low bits got a fresh bucket per request: the auth profile (OTP) was unlimited and
+// the in-memory limiter grew one bucket per address. IPv6 clients are now keyed by their /64.
+func TestByIPGroupsIPv6By64(t *testing.T) {
+	key := func(ip string) string {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.RemoteAddr = net.JoinHostPort(ip, "1234")
+		var got string
+		middleware.Chain(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { got = ByIP(r) }),
+			middleware.RealIP(nil)).ServeHTTP(httptest.NewRecorder(), r)
+		return got
+	}
+	a, b := key("2001:db8:1:2::1"), key("2001:db8:1:2:ffff:ffff:ffff:fffe")
+	if a != b {
+		t.Fatalf("same /64 gave different keys: %q vs %q", a, b)
+	}
+	if c := key("2001:db8:1:3::1"); c == a {
+		t.Fatalf("different /64 shared a key: %q", c)
+	}
+	if v4a, v4b := key("203.0.113.7"), key("203.0.113.8"); v4a == v4b || v4a != "ip:203.0.113.7" {
+		t.Fatalf("IPv4 keys = %q, %q; want one per address", v4a, v4b)
+	}
+	if m := key("::ffff:203.0.113.7"); m != "ip:203.0.113.7" {
+		t.Fatalf("IPv4-mapped key = %q", m)
+	}
+
+	// End to end: the auth profile must stop a client that rotates addresses inside its /64.
+	m := NewMemory(MemoryOptions{Now: newClock().Now})
+	h := middleware.Chain(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) }),
+		middleware.RealIP(nil), Middleware(m, Auth, Options{}))
+	denied := 0
+	for i := range 50 {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/auth/otp/request", nil)
+		r.RemoteAddr = fmt.Sprintf("[2001:db8:1:2::%x]:443", i+1)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		if rec.Code == http.StatusTooManyRequests {
+			denied++
+		}
+	}
+	if denied != 50-Auth.Rate.Burst {
+		t.Fatalf("denied %d of 50 rotating-IPv6 requests, want %d", denied, 50-Auth.Rate.Burst)
+	}
+}
+
+func TestIPBucket(t *testing.T) {
+	for in, want := range map[string]string{
+		"203.0.113.7":            "203.0.113.7",
+		"::ffff:203.0.113.7":     "203.0.113.7",
+		"2001:db8:a:b:c:d:e:f":   "2001:db8:a:b::/64",
+		"[2001:db8::1]":          "[2001:db8::1]", // not an address: returned unchanged
+		"":                       "",
+		"fe80::1%eth0":           "fe80::/64",
+		"2001:db8:a:b::1/128 xx": "2001:db8:a:b::1/128 xx",
+	} {
+		if got := IPBucket(in); got != want {
+			t.Errorf("IPBucket(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

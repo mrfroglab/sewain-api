@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/mrfroglab/sewain-api/internal/platform/middleware"
 )
 
 type ctxKey struct{}
@@ -25,8 +27,9 @@ func ViewerFrom(ctx context.Context) Viewer {
 // Middleware resolves the viewer from "Authorization: Bearer <token>" or the sewain_session cookie and stores
 // it in the request context. Invalid or expired credentials make the request a guest request (handlers decide
 // with RequireUser/RequireAdmin). Cookie-authenticated state-changing requests must carry an Origin (or
-// Referer) from AllowedOrigins, otherwise they are rejected with 403 (CSRF, D6). Bearer requests are exempt
-// because browsers never attach that header cross-site on their own.
+// Referer) from AllowedOrigins, otherwise they are rejected with 403 (CSRF, D6). Credential-less
+// state-changing requests that carry a foreign Origin are rejected too (login CSRF). Bearer requests are
+// exempt because browsers never attach that header cross-site on their own.
 func (s *Service) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, fromCookie := bearerToken(r), false
@@ -35,20 +38,26 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 				token, fromCookie = c.Value, true
 			}
 		}
-		if fromCookie && !safeMethod(r.Method) && !s.OriginAllowed(r) {
+		// Cookie-authenticated mutations need an allowed Origin/Referer. Cookieless, non-bearer mutations (the
+		// OTP login endpoints) are refused when a browser names a foreign origin, which stops login CSRF;
+		// clients that send no Origin at all (apps, curl) are unaffected.
+		checkOrigin := fromCookie || (token == "" && r.Header.Get("Origin") != "")
+		if checkOrigin && !safeMethod(r.Method) && !s.OriginAllowed(r) {
 			WriteError(w, userErr(http.StatusForbidden, MsgBadOrigin))
 			return
 		}
 		var v Viewer
 		if token != "" {
 			viewer, touched, err := s.Resolve(r.Context(), token)
-			switch {
-			case err == nil:
+			switch err {
+			case nil:
 				v = viewer
+				// Per-user rate limits and access logs read the user from the platform request info.
+				middleware.SetUserID(r.Context(), v.UserID)
 				if touched && fromCookie {
 					s.SetSessionCookie(w, token)
 				}
-			case err == ErrNoSession:
+			case ErrNoSession:
 				if fromCookie {
 					s.ClearSessionCookie(w)
 				}
@@ -76,10 +85,14 @@ func safeMethod(m string) bool {
 
 // OriginAllowed reports whether the request's Origin (or, without Origin, its Referer) is one of the
 // configured AllowedOrigins. With no AllowedOrigins configured (development), the request's own host is
-// accepted.
+// accepted. "Origin: null" is never allowed.
 func (s *Service) OriginAllowed(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
-	if origin == "" || origin == "null" {
+	if origin == "null" {
+		// Opaque origin (sandboxed frame, cross-origin redirect): the browser hides the initiator on purpose.
+		return false
+	}
+	if origin == "" {
 		ref := r.Header.Get("Referer")
 		if ref == "" {
 			return false
@@ -105,6 +118,8 @@ func (s *Service) OriginAllowed(r *http.Request) bool {
 
 // SetSessionCookie writes the session cookie (HttpOnly, SameSite=Lax, Path=/, Secure unless disabled).
 func (s *Service) SetSessionCookie(w http.ResponseWriter, token string) {
+	// #nosec G124 -- HttpOnly and SameSite are fixed; Secure is false only when SESSION_COOKIE_SECURE says so
+	// (plain-http development/demo), and ConfigFromEnv defaults it to true outside those environments.
 	http.SetCookie(w, &http.Cookie{
 		Name: SessionCookieName, Value: token, Path: "/", MaxAge: int(SessionTTL.Seconds()),
 		HttpOnly: true, Secure: s.Config.CookieSecure, SameSite: http.SameSiteLaxMode,
@@ -113,17 +128,28 @@ func (s *Service) SetSessionCookie(w http.ResponseWriter, token string) {
 
 // ClearSessionCookie deletes the session cookie.
 func (s *Service) ClearSessionCookie(w http.ResponseWriter) {
+	// #nosec G124 -- deletion cookie; same attributes as SetSessionCookie.
 	http.SetCookie(w, &http.Cookie{
 		Name: SessionCookieName, Value: "", Path: "/", MaxAge: -1,
 		HttpOnly: true, Secure: s.Config.CookieSecure, SameSite: http.SameSiteLaxMode,
 	})
 }
 
-// ClientIP returns the client IP: the trusted header (Config.ClientIPHeader) if set and present, otherwise
-// the connection's remote address.
+// ClientIP returns the client IP. When the platform chain ran (middleware.RealIP), its answer is used: it
+// only believes proxy headers from TRUSTED_PROXY_CIDRS. Otherwise the configured Config.ClientIPHeader is
+// read (for X-Forwarded-For the last hop, the one our own proxy appended; earlier hops are written by the
+// client), and finally the connection's remote address.
 func (s *Service) ClientIP(r *http.Request) string {
+	if ip := middleware.ClientIPFrom(r.Context()); ip != "" {
+		return ip
+	}
 	if h := s.Config.ClientIPHeader; h != "" {
-		if v := strings.TrimSpace(strings.Split(r.Header.Get(h), ",")[0]); v != "" {
+		hops := strings.Split(strings.Join(r.Header.Values(h), ","), ",")
+		v := hops[0]
+		if strings.EqualFold(h, "X-Forwarded-For") {
+			v = hops[len(hops)-1]
+		}
+		if v = strings.TrimSpace(v); v != "" {
 			return v
 		}
 	}

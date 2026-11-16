@@ -171,3 +171,24 @@ func TestZenzivaConfigValidation(t *testing.T) {
 		}
 	}
 }
+
+// Finding A1: ValidateConfig only compared APP_ENV with "production", so a typo or an unexpected value
+// ("prod", "Production", "live", "") let OTP_PROVIDER=echo (code returned in the response) or demo (fixed
+// 123456) start on a production deployment: anyone could sign in as any phone number. Unknown
+// environments must fail closed.
+func TestValidateConfigRejectsUnknownAppEnv(t *testing.T) {
+	for _, env := range []string{"prod", "Production", "PRODUCTION", "live", "production ", "", "staging2"} {
+		for _, p := range []string{ProviderEcho, ProviderDemo, ProviderZenziva} {
+			if err := ValidateConfig(env, true, p); err == nil {
+				t.Errorf("ValidateConfig(%q, demo, %s) = nil, want error", env, p)
+			}
+		}
+	}
+	pepper := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", 32)))
+	if _, err := ConfigFromEnv(envMap(map[string]string{"APP_ENV": "prod", "OTP_PROVIDER": "echo", "OTP_PEPPER": pepper})); err == nil {
+		t.Fatal("APP_ENV=prod with the echo provider must fail")
+	}
+	if _, err := NewSender(Config{AppEnv: "Production", OTPProvider: ProviderEcho}); err == nil {
+		t.Fatal("NewSender(echo) with APP_ENV=Production must fail")
+	}
+}

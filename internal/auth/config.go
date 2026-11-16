@@ -50,6 +50,12 @@ type Config struct {
 
 // ValidateConfig rejects OTP providers that must never run in production (D10) and unknown providers.
 func ValidateConfig(appEnv string, demoMode bool, provider string) error {
+	// Fail closed: an unexpected APP_ENV ("prod", "Production", "") must not be treated as non-production.
+	switch appEnv {
+	case "demo", "development", "staging", "production":
+	default:
+		return fmt.Errorf("auth: unknown APP_ENV %q (demo|development|staging|production)", appEnv)
+	}
 	prod := appEnv == "production"
 	if prod && demoMode {
 		return errors.New("auth: DEMO_MODE=true is not allowed when APP_ENV=production")

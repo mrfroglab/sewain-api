@@ -539,3 +539,99 @@ func between(s, a, b string) string {
 	s = s[i+len(a):]
 	return s[:strings.Index(s, b)]
 }
+
+// stuckBlobs fails Delete (and still reports the object) for keys containing stuck.
+type stuckBlobs struct {
+	*kyctest.MemBlobStore
+	stuck string
+}
+
+func (s stuckBlobs) Delete(c context.Context, key string) error {
+	if strings.Contains(key, s.stuck) {
+		return errors.New("access denied")
+	}
+	return s.MemBlobStore.Delete(c, key)
+}
+
+// Finding K1: PurgeFiles always picked the oldest due submission and returned on the first error. One object
+// that cannot be deleted (permissions, object lock, a key the store rejects) therefore blocked the purge of
+// every later KTP and selfie forever, keeping identity documents past the 30-day policy (UU PDP).
+func TestPurgeContinuesPastAFailingSubmission(t *testing.T) {
+	f := newFixture(t)
+	a := f.submit(t, "u-a", nikA)
+	f.clock.Advance(time.Minute)
+	b := f.submit(t, "u-b", nikB)
+	for _, id := range []string{a.ID, b.ID} {
+		if _, err := f.svc.Decide(ctx, admin, id, "reject", "foto buram"); err != nil {
+			t.Fatal(err)
+		}
+		f.clock.Advance(time.Minute)
+	}
+	f.svc.Blobs = stuckBlobs{MemBlobStore: f.blobs, stuck: a.ID}
+	n, err := f.svc.PurgeFiles(ctx, t0.Add(kyc.FileRetention+time.Hour))
+	if err == nil || n != 1 {
+		t.Fatalf("PurgeFiles = %d, %v; want 1 purged and the stuck submission reported", n, err)
+	}
+	for k := range f.blobs.Snapshot() {
+		if strings.Contains(k, b.ID) {
+			t.Fatalf("blob %s of the healthy submission survived", k)
+		}
+	}
+	got, _ := f.svc.Get(ctx, admin, a.ID)
+	if got.FilesPurgedAt != nil {
+		t.Fatal("the stuck submission must not be marked purged")
+	}
+	// Once the store recovers, the next run finishes the job.
+	f.svc.Blobs = f.blobs
+	if n, err := f.svc.PurgeFiles(ctx, t0.Add(kyc.FileRetention+2*time.Hour)); err != nil || n != 1 {
+		t.Fatalf("second run = %d, %v", n, err)
+	}
+}
+
+// Finding K2 (UU PDP): there was no way to erase a user's identity data. Soft-deleting the user (core) kept
+// the encrypted NIK, name and the KTP/selfie objects forever (pending submissions are never purged), and a
+// hard delete cascaded the rows away but orphaned the encrypted files in the blob store. EraseUser deletes
+// the files and the rows; the NIK blacklist (an HMAC, needed against re-registration) stays.
+func TestEraseUserRemovesIdentityData(t *testing.T) {
+	f := newFixture(t)
+	a := f.submit(t, "u-a", nikA)
+	if _, err := f.svc.Decide(ctx, admin, a.ID, "reject", "buram"); err != nil {
+		t.Fatal(err)
+	}
+	a2 := f.submit(t, "u-a", nikA)
+	if _, err := f.svc.Decide(ctx, admin, a2.ID, "approve", ""); err != nil {
+		t.Fatal(err)
+	}
+	f.submit(t, "u-b", nikB) // another user's data must survive
+	if err := f.svc.BlacklistUser(ctx, admin, "u-a", "penipuan"); err != nil {
+		t.Fatal(err)
+	}
+	n, err := f.svc.EraseUser(ctx, "u-a")
+	if err != nil || n != 2 {
+		t.Fatalf("EraseUser = %d, %v", n, err)
+	}
+	for k := range f.blobs.Snapshot() {
+		if strings.Contains(k, a.ID) || strings.Contains(k, a2.ID) {
+			t.Fatalf("blob %s survived erase", k)
+		}
+	}
+	if len(f.blobs.Snapshot()) != 2 {
+		t.Fatalf("u-b's files must stay: %d blobs", len(f.blobs.Snapshot()))
+	}
+	var subs, ids, bl int
+	_ = f.db.QueryRow(ctx, `SELECT (SELECT count(*) FROM kyc_submissions WHERE user_id = 'u-a'),
+		(SELECT count(*) FROM identities WHERE user_id = 'u-a'), (SELECT count(*) FROM nik_blacklist)`).Scan(&subs, &ids, &bl)
+	if subs != 0 || ids != 0 || bl != 1 {
+		t.Fatalf("after erase: submissions=%d identities=%d blacklist=%d", subs, ids, bl)
+	}
+	if len(f.audit.Find("kyc.erase")) != 1 {
+		t.Fatal("erase must be audited")
+	}
+	// The blacklisted NIK still cannot be reused by a fresh account.
+	_, err = f.svc.Submit(ctx, "u-c", kyc.SubmitInput{NIK: nikA, NameOnKTP: "Budi", KTP: jpeg("k"), Selfie: png("s")})
+	wantStatus(t, err, http.StatusForbidden)
+	// Idempotent.
+	if n, err := f.svc.EraseUser(ctx, "u-a"); err != nil || n != 0 {
+		t.Fatalf("second erase = %d, %v", n, err)
+	}
+}

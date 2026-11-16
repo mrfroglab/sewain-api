@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"image"
+	"image/color"
 	"image/jpeg"
 	"image/png"
 
@@ -18,7 +19,60 @@ const (
 	MaxUploadBytes = 10 << 20
 	MaxDimension   = 8000
 	MinDimension   = 32
+	// MaxDecodeBytes bounds the memory one full decode may take, estimated from the header: width × height ×
+	// bytes per pixel (at least 4, the RGBA canvas the watermark draws on). The API runs with a 256 MB
+	// memory limit, so 64 MB (e.g. 4096 × 4096 at 8 bit) leaves room for the decoded image plus the
+	// watermark canvas. A tiny compressed file can declare a huge image (decompression bomb), which is why
+	// the dimension check alone is not enough.
+	MaxDecodeBytes = 64 << 20
+	// MaxConcurrentDecodes is how many full decodes (upload validation, watermark rendering) may run at once
+	// in this process. Together with MaxDecodeBytes it caps the pixel memory at roughly 2 × MaxDecodeBytes.
+	MaxConcurrentDecodes = 1
 )
+
+// decodeSlots serializes full decodes; decodeHook lets tests observe them.
+var (
+	decodeSlots = make(chan struct{}, MaxConcurrentDecodes)
+	decodeHook  func() (done func())
+)
+
+func acquireDecode() (release func()) {
+	decodeSlots <- struct{}{}
+	var done func()
+	if decodeHook != nil {
+		done = decodeHook()
+	}
+	return func() {
+		if done != nil {
+			done()
+		}
+		<-decodeSlots
+	}
+}
+
+// decodeCost estimates the bytes a full decode of cfg allocates, counting at least 4 bytes per pixel for
+// the RGBA canvas used by Watermark.
+func decodeCost(cfg image.Config) int64 {
+	bpp := int64(4)
+	switch cfg.ColorModel {
+	case color.RGBA64Model, color.NRGBA64Model:
+		bpp = 8
+	}
+	return int64(cfg.Width) * int64(cfg.Height) * bpp
+}
+
+// decodeConfig reads only the image header.
+func decodeConfig(typ string, data []byte) (image.Config, error) {
+	switch typ {
+	case TypeJPEG:
+		return jpeg.DecodeConfig(bytes.NewReader(data))
+	case TypePNG:
+		return png.DecodeConfig(bytes.NewReader(data))
+	case TypeWebP:
+		return webp.DecodeConfig(bytes.NewReader(data))
+	}
+	return image.Config{}, errUnsupported
+}
 
 // Image types accepted for upload.
 const (
@@ -49,14 +103,15 @@ func (e *UploadError) Error() string { return e.Msg }
 func uploadErr(status int, msg string) error { return &UploadError{Status: status, Msg: msg} }
 
 var (
-	errTooLarge    = uploadErr(413, "Foto terlalu besar (maks 10 MB).")
-	errEmpty       = uploadErr(400, "File foto kosong.")
-	errUnsupported = uploadErr(415, "Format foto tidak didukung. Pakai JPEG, PNG, atau WebP.")
-	errCorrupt     = uploadErr(400, "File foto rusak atau bukan gambar yang valid.")
-	errTrailing    = uploadErr(400, "File foto berisi data tambahan yang tidak dikenal. Ambil ulang fotonya, ya.")
-	errMarkup      = uploadErr(400, "File foto berisi kode/skrip tersembunyi, jadi ditolak.")
-	errTooSmall    = uploadErr(400, "Foto terlalu kecil (minimal 32 × 32 piksel).")
-	errTooWide     = uploadErr(400, "Dimensi foto terlalu besar (maks 8000 piksel per sisi).")
+	errTooLarge      = uploadErr(413, "Foto terlalu besar (maks 10 MB).")
+	errEmpty         = uploadErr(400, "File foto kosong.")
+	errUnsupported   = uploadErr(415, "Format foto tidak didukung. Pakai JPEG, PNG, atau WebP.")
+	errCorrupt       = uploadErr(400, "File foto rusak atau bukan gambar yang valid.")
+	errTrailing      = uploadErr(400, "File foto berisi data tambahan yang tidak dikenal. Ambil ulang fotonya, ya.")
+	errMarkup        = uploadErr(400, "File foto berisi kode/skrip tersembunyi, jadi ditolak.")
+	errTooSmall      = uploadErr(400, "Foto terlalu kecil (minimal 32 × 32 piksel).")
+	errTooWide       = uploadErr(400, "Dimensi foto terlalu besar (maks 8000 piksel per sisi).")
+	errTooManyPixels = uploadErr(400, "Resolusi foto terlalu besar (maks sekitar 16 megapiksel). Kecilkan dulu fotonya, ya.")
 )
 
 var mimeOf = map[string]string{TypeJPEG: "image/jpeg", TypePNG: "image/png", TypeWebP: "image/webp"}
@@ -124,16 +179,7 @@ func Inspect(data []byte) (Info, error) {
 		return Info{}, errUnsupported
 	}
 	// Header first: reject absurd dimensions before allocating pixels (decompression bombs).
-	var cfg image.Config
-	var err error
-	switch typ {
-	case TypeJPEG:
-		cfg, err = jpeg.DecodeConfig(bytes.NewReader(data))
-	case TypePNG:
-		cfg, err = png.DecodeConfig(bytes.NewReader(data))
-	case TypeWebP:
-		cfg, err = webp.DecodeConfig(bytes.NewReader(data))
-	}
+	cfg, err := decodeConfig(typ, data)
 	if err != nil {
 		return Info{}, errCorrupt
 	}
@@ -142,6 +188,9 @@ func Inspect(data []byte) (Info, error) {
 	}
 	if cfg.Width < MinDimension || cfg.Height < MinDimension {
 		return Info{}, errTooSmall
+	}
+	if decodeCost(cfg) > MaxDecodeBytes {
+		return Info{}, errTooManyPixels
 	}
 	meta, err := checkContainer(typ, data)
 	if err != nil {
@@ -153,7 +202,10 @@ func Inspect(data []byte) (Info, error) {
 		}
 	}
 	// Full decode proves the pixel data is complete and well-formed, not just the header.
-	if _, err := decodeImage(typ, data); err != nil {
+	release := acquireDecode()
+	_, err = decodeImage(typ, data)
+	release()
+	if err != nil {
 		return Info{}, errCorrupt
 	}
 	sum := sha256.Sum256(data)
@@ -278,7 +330,7 @@ func parseJPEG(data []byte) ([]jpegSegment, int, error) {
 				if i+1 >= len(data) {
 					return nil, 0, errFormat
 				}
-				if data[i] == 0xFF && data[i+1] != 0x00 && !(data[i+1] >= 0xD0 && data[i+1] <= 0xD7) && data[i+1] != 0xFF {
+				if data[i] == 0xFF && data[i+1] != 0x00 && (data[i+1] < 0xD0 || data[i+1] > 0xD7) && data[i+1] != 0xFF {
 					break
 				}
 				i++

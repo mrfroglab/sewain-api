@@ -33,6 +33,10 @@ type Event struct {
 // Resolver identifies the viewer of a WebSocket request. An empty userID means a guest. role "admin" marks admins.
 type Resolver func(r *http.Request) (userID, role string)
 
+// DefaultMaxGuestConns is the guest connection cap when Options.MaxGuestConns is 0. Every connection holds
+// goroutines and buffers, so an uncapped hub lets one client exhaust the process' memory.
+const DefaultMaxGuestConns = 1000
+
 // RoleAdmin is the role string that subscribes a connection to Admins events.
 const RoleAdmin = "admin"
 
@@ -48,7 +52,8 @@ type Options struct {
 	CurrentVersion func(ctx context.Context) (int64, error)
 	// MaxConnsPerUser caps simultaneous connections of one signed-in user (default 5). Extra ones get HTTP 429.
 	MaxConnsPerUser int
-	// MaxGuestConns caps guest connections on this instance (default 0 = unlimited).
+	// MaxGuestConns caps guest connections on this instance. 0 means DefaultMaxGuestConns; a negative value
+	// means unlimited (only behind another connection limit).
 	MaxGuestConns int
 	// SendBuffer is the per-connection queue length (default 16). A connection whose queue is full is dropped.
 	SendBuffer int
@@ -85,6 +90,9 @@ type client struct {
 func NewHub(opt Options) *Hub {
 	if opt.MaxConnsPerUser <= 0 {
 		opt.MaxConnsPerUser = 5
+	}
+	if opt.MaxGuestConns == 0 {
+		opt.MaxGuestConns = DefaultMaxGuestConns
 	}
 	if opt.SendBuffer <= 0 {
 		opt.SendBuffer = 16
@@ -130,7 +138,7 @@ func (h *Hub) Publish(e Event) {
 	}
 	for c := range h.clients {
 		_, mine := users[c.userID]
-		if !e.Public && !(e.Admins && c.admin) && !(c.userID != "" && mine) {
+		if !e.Public && (!e.Admins || !c.admin) && (c.userID == "" || !mine) {
 			continue
 		}
 		select {
@@ -213,7 +221,8 @@ func (h *Hub) register(userID, role string) (*client, context.Context, int) {
 		}
 		h.perUser[userID]++
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	// cancel is owned by the client and called by client.stop (unregister, Close, slow-client drop).
+	ctx, cancel := context.WithCancel(context.Background()) // #nosec G118 -- stored in client.cancel, see stop
 	c := &client{userID: userID, admin: role == RoleAdmin, send: make(chan []byte, h.opt.SendBuffer), cancel: cancel}
 	h.clients[c] = struct{}{}
 	return c, ctx, 0
@@ -281,7 +290,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 	conn.SetReadLimit(1024) // clients never need to send anything meaningful
 
 	// Read loop: required for pong/close handling. Any client message is ignored; a read error ends the session.
