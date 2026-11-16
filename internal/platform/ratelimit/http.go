@@ -61,22 +61,76 @@ type Profile struct {
 	Key  KeyFunc
 }
 
-// Built-in profiles (F5.2). Burst is smaller than the per-minute limit so a client cannot spend a whole
-// minute's allowance in one second.
+// Built-in profiles (F5.2) with the pilot defaults. Burst is smaller than the per-minute limit so a client
+// cannot spend a whole minute's allowance in one second.
+//
+// The numbers are sized for a campus NAT: one Wi-Fi egress IP can carry hundreds to thousands of students
+// (the UGM pilot, a registration booth), so per-IP limits must hold a few hundred people browsing at once.
+// Signed-in traffic is keyed per user wherever possible, so an IP shared by many students does not share
+// one bucket. Every rate can be overridden from the environment (see Rates and config.Config.Rates).
 var (
-	// Public: anonymous reads (snapshot, search, photos) per IP. A campus NAT can put many students behind
-	// one IP, hence the generous limit.
-	Public = Profile{Name: "public", Rate: Rate{Limit: 120, Per: time.Minute, Burst: 60}, Key: ByIP}
-	// Write: state-changing actions per user.
-	Write = Profile{Name: "write", Rate: Rate{Limit: 60, Per: time.Minute, Burst: 20}, Key: ByUser}
-	// Upload: photo and KYC uploads per user.
-	Upload = Profile{Name: "upload", Rate: Rate{Limit: 20, Per: time.Minute, Burst: 10}, Key: ByUser}
-	// Auth: OTP request/verify and login per IP.
-	Auth = Profile{Name: "auth", Rate: Rate{Limit: 10, Per: time.Minute, Burst: 5}, Key: ByIP}
+	// Public: the coarse limit on every route, keyed per signed-in user and per IP for guests (ByUser).
+	// 1200/min per guest IP lets a crowd of anonymous visitors behind one NAT browse; a single flooding IP
+	// still hits it.
+	Public = Profile{Name: "public", Rate: DefaultRates().Public, Key: ByUser}
+	// Write: state-changing actions per user (guests per IP).
+	Write = Profile{Name: "write", Rate: DefaultRates().Write, Key: ByUser}
+	// Upload: photo and KYC uploads per user (guests per IP).
+	Upload = Profile{Name: "upload", Rate: DefaultRates().Upload, Key: ByUser}
+	// Auth: OTP request/verify per IP. The OTP service adds its own per-phone, per-IP and daily limits in
+	// the database (auth.Config), which are the real defense against SMS pumping.
+	Auth = Profile{Name: "auth", Rate: DefaultRates().Auth, Key: ByIP}
+	// Demo: the DEMO_MODE persona login per IP. Generous on purpose: a demo or a regression run logs many
+	// personas in from one machine, and the endpoint does not exist outside DEMO_MODE.
+	Demo = Profile{Name: "demo", Rate: DefaultRates().Demo, Key: ByIP}
 )
 
-// Profiles lists the built-in profiles.
-func Profiles() []Profile { return []Profile{Public, Write, Upload, Auth} }
+// Rates are the configurable rates of the built-in profiles.
+type Rates struct {
+	Public, Write, Upload, Auth, Demo Rate
+}
+
+// DefaultRates returns the pilot defaults (docs/integration/ops.md §2).
+func DefaultRates() Rates {
+	perMin := func(limit, burst int) Rate { return Rate{Limit: limit, Per: time.Minute, Burst: burst} }
+	return Rates{
+		Public: perMin(1200, 300),
+		Write:  perMin(120, 40),
+		Upload: perMin(30, 10),
+		Auth:   perMin(60, 20),
+		Demo:   perMin(600, 100),
+	}
+}
+
+// WithDefaults replaces every unset rate (Limit <= 0) with its default and fills a missing Per with a minute.
+func (r Rates) WithDefaults() Rates {
+	d := DefaultRates()
+	pick := func(v, def Rate) Rate {
+		if v.Limit <= 0 {
+			return def
+		}
+		if v.Per <= 0 {
+			v.Per = time.Minute
+		}
+		return v
+	}
+	return Rates{
+		Public: pick(r.Public, d.Public),
+		Write:  pick(r.Write, d.Write),
+		Upload: pick(r.Upload, d.Upload),
+		Auth:   pick(r.Auth, d.Auth),
+		Demo:   pick(r.Demo, d.Demo),
+	}
+}
+
+// With returns p with rate r (the profile name and key stay).
+func (p Profile) With(r Rate) Profile {
+	p.Rate = r
+	return p
+}
+
+// Profiles lists the built-in profiles with their default rates.
+func Profiles() []Profile { return []Profile{Public, Write, Upload, Auth, Demo} }
 
 // Options tunes Middleware.
 type Options struct {
