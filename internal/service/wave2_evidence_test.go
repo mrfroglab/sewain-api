@@ -20,7 +20,7 @@ func TestEvidencePhotosBelongToTheBooking(t *testing.T) {
 	if _, err := e.try("u-dina", "submitCheckout", "u-dina", "b-accepted", map[string]any{"photoIds": foreign, "collateralPhotoIds": jaminan}); err == nil {
 		t.Error("check-out with photos uploaded by another user accepted")
 	}
-	ref := e.photos(3, "referensi", "u-dina", nil) // the listing's catalogue photos are not condition evidence
+	ref := e.photos(3, "referensi", "u-dina", nil) // the listing's catalog photos are not condition evidence
 	if _, err := e.try("u-dina", "submitCheckout", "u-dina", "b-accepted", map[string]any{"photoIds": ref, "collateralPhotoIds": jaminan}); err == nil {
 		t.Error("check-out with listing reference photos accepted")
 	}

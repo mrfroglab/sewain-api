@@ -185,13 +185,14 @@ func NeedsManualApproval(l *Listing, rules CollateralRules) bool {
 
 // Bounds of listing input (review wave 2, M1). Money is integer rupiah; MaxRupiah keeps price × days (≤ MaxRentalDays)
 // far from int64 overflow and is above any item rented peer to peer.
+const MaxRupiah int64 = 10_000_000_000 // Rp10 miliar
+
 const (
-	MaxRupiah         int64 = 10_000_000_000 // Rp10 miliar
-	MaxRentalDays           = 365
-	MaxListingStock         = 1000
-	MaxListingRadius        = 50 // km, like the search and the CSV import
-	maxListingPhotos        = 20
-	maxCollateralOpts       = 10
+	MaxRentalDays     = 365
+	MaxListingStock   = 1000
+	MaxListingRadius  = 50 // km, like the search and the CSV import
+	maxListingPhotos  = 20
+	maxCollateralOpts = 10
 )
 
 // textLimits are the longest texts a listing may carry (runes).
