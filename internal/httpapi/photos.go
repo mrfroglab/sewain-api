@@ -54,9 +54,9 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "Gagal memuat data.")
 		return
 	}
-	// The ETag describes the version the snapshot was built from (it may be newer than the one checked above),
+	// The ETag describes the viewer version the snapshot was built from (it may be newer than the one checked above),
 	// so a 304 never hides a newer state.
-	w.Header().Set("ETag", windowed(s.svc.ETagFor(viewer, snap.Version, snap.ClockOffset), window))
+	w.Header().Set("ETag", windowed(s.svc.ETagFor(viewer, snap.ViewerVersion, snap.ClockOffset), window))
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_, _ = w.Write(b) // #nosec G705 -- JSON (Content-Type application/json, nosniff), not HTML
 }

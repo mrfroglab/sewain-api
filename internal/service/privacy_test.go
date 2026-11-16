@@ -261,7 +261,7 @@ func TestETag(t *testing.T) {
 		t.Fatal("ETag must differ per viewer")
 	}
 	snap, _ := e.svc.Snapshot(e.ctx, raka)
-	if e.svc.ETagFor(raka, snap.Version, snap.ClockOffset) != a {
+	if e.svc.ETagFor(raka, snap.ViewerVersion, snap.ClockOffset) != a {
 		t.Fatal("ETag of the snapshot must match")
 	}
 	e.must("u-raka", "toggleFavorite", "u-raka", "l-headlamp")
