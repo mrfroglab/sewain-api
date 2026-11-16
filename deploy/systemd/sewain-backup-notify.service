@@ -1,0 +1,6 @@
+[Unit]
+Description=Notify that the Sewain backup failed
+
+[Service]
+Type=oneshot
+ExecStart=/opt/stacks/apps/sewain/backup.sh notify-fail

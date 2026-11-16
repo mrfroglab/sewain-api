@@ -1,0 +1,8 @@
+[Unit]
+Description=Sewain daily backup (Postgres + uploads)
+After=docker.service network-online.target
+OnFailure=sewain-backup-notify.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/stacks/apps/sewain/backup.sh
