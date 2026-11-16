@@ -1,0 +1,6 @@
+[Unit]
+Description=Sewain uptime/health watchdog (demo)
+
+[Service]
+Type=oneshot
+ExecStart=/opt/stacks/apps/sewain/healthcheck.sh
