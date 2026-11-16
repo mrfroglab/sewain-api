@@ -1,0 +1,19 @@
+{
+  "_comment": "PERLU VERIFIKASI SANDBOX: shape from https://docs.xendit.co/apidocs/create-payment-request (QR example uses QRPROMPTPAY; QRIS values not shown publicly)",
+  "payment_request_id": "pr-1a2b3c4d-0000-4000-8000-000000000001",
+  "reference_id": "pi-test",
+  "business_id": "biz-test",
+  "type": "PAY",
+  "country": "ID",
+  "currency": "IDR",
+  "request_amount": 105000,
+  "capture_method": "AUTOMATIC",
+  "channel_code": "QRIS",
+  "channel_properties": {"expires_at": "2026-11-16T10:30:00Z"},
+  "status": "REQUIRES_ACTION",
+  "actions": [
+    {"type": "PRESENT_TO_CUSTOMER", "descriptor": "QR_STRING", "value": "00020101021226660014ID.CO.QRIS.WWW0118936000000000000000"}
+  ],
+  "created": "2026-11-16T10:00:00Z",
+  "updated": "2026-11-16T10:00:00Z"
+}

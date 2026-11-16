@@ -1,0 +1,22 @@
+{
+  "event": "payment.capture",
+  "business_id": "biz-test",
+  "created": "2026-11-16T10:05:00Z",
+  "data": {
+    "payment_id": "py-1a2b3c4d-0000-4000-8000-000000000001",
+    "business_id": "biz-test",
+    "reference_id": "pi-test",
+    "payment_request_id": "pr-1a2b3c4d-0000-4000-8000-000000000001",
+    "type": "PAY",
+    "country": "ID",
+    "currency": "IDR",
+    "request_amount": 105000,
+    "capture_method": "AUTOMATIC",
+    "channel_code": "QRIS",
+    "captures": [{"capture_id": "cptr-0001", "capture_timestamp": "2026-11-16T10:05:00Z", "capture_amount": 105000}],
+    "status": "SUCCEEDED",
+    "metadata": {"intent_id": "pi-test"},
+    "created": "2026-11-16T10:00:00Z",
+    "updated": "2026-11-16T10:05:00Z"
+  }
+}
