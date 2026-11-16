@@ -19,7 +19,7 @@ type TimeoutOptions struct {
 	Skip func(r *http.Request) bool
 }
 
-// Timeout gives each request a deadline. The handler's context is cancelled at d and, if it has not
+// Timeout gives each request a deadline. The handler's context is canceled at d and, if it has not
 // finished, the client receives 503 {"ok":false,"error":TimeoutMessage}. Like http.TimeoutHandler the
 // response is buffered until the handler returns, so streaming handlers (WebSocket, SSE, large downloads)
 // must be skipped. A panic in the handler is re-raised on the serving goroutine so Recover still sees it.

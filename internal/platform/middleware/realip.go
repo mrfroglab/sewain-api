@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// IPResolver finds the client IP. Proxy headers (CF-Connecting-IP, X-Forwarded-For) are honoured only when
+// IPResolver finds the client IP. Proxy headers (CF-Connecting-IP, X-Forwarded-For) are honored only when
 // the direct peer is inside one of the trusted CIDRs; otherwise anyone could spoof their IP and dodge
 // per-IP rate limits.
 type IPResolver struct {

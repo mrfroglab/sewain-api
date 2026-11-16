@@ -32,7 +32,7 @@ func DefaultCORS(origins []string) CORSOptions {
 // CORSForbiddenMessage is the body of a rejected preflight.
 const CORSForbiddenMessage = "Origin tidak diizinkan."
 
-// CORS implements a strict allow-list. A wildcard "*" is honoured only without credentials, since browsers
+// CORS implements a strict allow-list. A wildcard "*" is honored only without credentials, since browsers
 // refuse "*" together with cookies. Preflights (OPTIONS + Access-Control-Request-Method) from allowed origins
 // get 204 with the cached policy; from other origins 403. Simple requests from other origins pass through
 // without CORS headers, so the browser blocks the response.

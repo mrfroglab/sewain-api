@@ -23,7 +23,7 @@ type Options struct {
 	Listener net.Listener
 }
 
-// Run serves srv until ctx is cancelled, then calls srv.Shutdown and waits up to ShutdownTimeout for
+// Run serves srv until ctx is canceled, then calls srv.Shutdown and waits up to ShutdownTimeout for
 // in-flight requests. Hijacked connections (WebSocket) are not tracked by Shutdown: register a close hook
 // with srv.RegisterOnShutdown to tell them to go away. Returns nil on a clean shutdown.
 func Run(ctx context.Context, srv *http.Server, o Options) error {

@@ -386,7 +386,7 @@ func TestCORS(t *testing.T) {
 		t.Errorf("allowed origin: %d %v", rr.Code, rr.Header())
 	}
 	if rr := do(http.MethodGet, "http://localhost:3000", false); rr.Header().Get("Access-Control-Allow-Origin") != "http://localhost:3000" {
-		t.Errorf("trailing slash in config not normalised: %v", rr.Header())
+		t.Errorf("trailing slash in config not normalized: %v", rr.Header())
 	}
 
 	rr = do(http.MethodGet, "https://evil.example", false)
@@ -420,7 +420,7 @@ func TestCORSWildcardNeverWithCredentials(t *testing.T) {
 	rr := httptest.NewRecorder()
 	CORS(o)(next).ServeHTTP(rr, req)
 	if rr.Header().Get("Access-Control-Allow-Origin") != "" {
-		t.Fatal("wildcard honoured together with credentials")
+		t.Fatal("wildcard honored together with credentials")
 	}
 	o.AllowCredentials = false
 	rr = httptest.NewRecorder()

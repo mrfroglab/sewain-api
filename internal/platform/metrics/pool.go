@@ -31,7 +31,7 @@ func newPoolCollector(p poolStater) *PoolCollector {
 		constructing:    d("constructing_conns", "Connections being established."),
 		max:             d("max_conns", "Configured maximum pool size."),
 		acquires:        d("acquire_total", "Successful connection acquisitions."),
-		canceled:        d("canceled_acquire_total", "Acquisitions cancelled by their context."),
+		canceled:        d("canceled_acquire_total", "Acquisitions canceled by their context."),
 		empty:           d("empty_acquire_total", "Acquisitions that had to wait because the pool was empty."),
 		newConns:        d("new_conns_total", "Connections opened."),
 		lifetimeDestroy: d("max_lifetime_destroy_total", "Connections closed for exceeding MaxConnLifetime."),
