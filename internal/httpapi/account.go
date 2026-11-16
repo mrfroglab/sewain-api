@@ -40,6 +40,14 @@ func (s *Server) deleteMe(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "Gagal menghapus akun.")
 		return
 	}
+	// Sessions are already gone with the account; revoke again in case one was created concurrently. Identity data
+	// (KTP/selfie files, encrypted NIK) is erased by the KYC module; a failure is retried by the retention job.
+	if _, err := s.deps.Auth.RevokeAllSessions(r.Context(), v.UserID); err != nil {
+		s.log.Error("delete account: revoke sessions", "err", err)
+	}
+	if _, err := s.deps.KYC.EraseUser(r.Context(), v.UserID); err != nil {
+		s.log.Error("delete account: erase identity", "err", err)
+	}
 	s.deps.Auth.ClearSessionCookie(w)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

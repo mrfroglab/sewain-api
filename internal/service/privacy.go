@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
 
 	"github.com/mrfroglab/sewain-api/internal/domain"
 )
@@ -126,7 +125,8 @@ func (s *Service) Export(ctx context.Context, userID string) (map[string]any, er
 // DeleteAccount is DELETE /api/v1/me (UU PDP right to erasure) as anonymisation: bookings, reviews and evidence stay
 // for the other party, but the profile loses name, phone, e-mail, bio and NIK, sessions/push/preferences/
 // notifications are deleted, own listings are taken down and wanted posts closed. Refused while a booking is still
-// running or a dispute is open.
+// running or a dispute is open. Identity data (KYC files, submissions, identity) is erased by the KYC module after
+// this commits (kyc.EraseUser); DeletedAccountsWithKYC lists accounts where that still has to happen.
 func (s *Service) DeleteAccount(ctx context.Context, userID string) (Change, error) {
 	return s.run(ctx, func(t *txn) error {
 		u := t.userForUpdate(userID)
@@ -148,14 +148,6 @@ func (s *Service) DeleteAccount(ctx context.Context, userID string) (Change, err
 		if running > 0 {
 			return domain.Fail("Masih ada sewaan yang berjalan. Selesaikan atau batalkan dulu sebelum menghapus akun.")
 		}
-		var pendingKYC bool
-		err = t.tx.QueryRow(t.ctx, `SELECT EXISTS (SELECT 1 FROM kyc_submissions WHERE user_id = $1 AND status = 'pending')`, userID).Scan(&pendingKYC)
-		if !t.check(err) {
-			return nil
-		}
-		if pendingKYC {
-			return domain.Fail("Pengajuan verifikasimu masih ditinjau admin. Coba lagi setelah ada keputusan.")
-		}
 		oldPhone := u.Phone
 		stmts := []struct {
 			sql  string
@@ -170,9 +162,6 @@ func (s *Service) DeleteAccount(ctx context.Context, userID string) (Change, err
 			{`DELETE FROM notification_outbox WHERE user_id = $1`, []any{userID}},
 			{`DELETE FROM notifications WHERE user_id = $1`, []any{userID}},
 			{`DELETE FROM favorites WHERE user_id = $1`, []any{userID}},
-			{`DELETE FROM identities WHERE user_id = $1`, []any{userID}},
-			{`UPDATE kyc_submissions SET files_purge_after = least(coalesce(files_purge_after, $2), $2) WHERE user_id = $1 AND files_purged_at IS NULL`,
-				[]any{userID, tsOf(t.now)}},
 			{`UPDATE listings SET status = 'diturunkan', updated_at = now() WHERE owner_id = $1`, []any{userID}},
 			{`UPDATE wanted_posts SET status = 'ditutup', updated_at = now() WHERE requester_id = $1 AND status = 'terbuka'`, []any{userID}},
 		}
@@ -192,14 +181,4 @@ func (s *Service) DeleteAccount(ctx context.Context, userID string) (Change, err
 		t.audit(userID, "akun.hapus", userID, nil, nil)
 		return nil
 	})
-}
-
-// IsDeleted reports whether the account was deleted.
-func (s *Service) IsDeleted(ctx context.Context, userID string) (bool, error) {
-	var deleted bool
-	err := s.pool.QueryRow(ctx, `SELECT deleted_at IS NOT NULL FROM users WHERE id = $1`, userID).Scan(&deleted)
-	if err == pgx.ErrNoRows {
-		return true, nil
-	}
-	return deleted, err
 }

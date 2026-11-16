@@ -44,6 +44,10 @@ type Options struct {
 	PushHosts []string
 	// Metrics, when nil, a fresh registry is created.
 	Metrics *metrics.Metrics
+	// Signer replaces the MEDIA_SIGNING_KEY signer.
+	Signer *media.Signer
+	// OnListen runs whenever the LISTEN connection is (re)established.
+	OnListen func()
 }
 
 // App is a wired API process.
@@ -98,7 +102,9 @@ func New(cfg config.Config, pool *pgxpool.Pool, log *slog.Logger, opt Options) (
 			return nil, fmt.Errorf("media retention storage: %w", err)
 		}
 	}
-	if cfg.MediaSigningKey {
+	if opt.Signer != nil {
+		a.Signer = opt.Signer
+	} else if cfg.MediaSigningKey {
 		a.Signer, err = media.SignerFromEnv()
 	} else if cfg.EphemeralKeysOK() {
 		log.Warn("MEDIA_SIGNING_KEY not set: using a random key, signed photo URLs break on restart")
@@ -112,6 +118,7 @@ func New(cfg config.Config, pool *pgxpool.Pool, log *slog.Logger, opt Options) (
 	if err != nil {
 		return nil, fmt.Errorf("media signer: %w", err)
 	}
+	a.Signer.SetClock(now)
 
 	// Auth + KYC on top of the core user repository.
 	sender, err := auth.NewSender(cfg.Auth)
@@ -157,7 +164,7 @@ func New(cfg config.Config, pool *pgxpool.Pool, log *slog.Logger, opt Options) (
 		Logger:         log,
 	})
 	a.publisher = &realtime.Publisher{DB: pool, Hub: a.Hub, Origin: instance}
-	a.listener = &realtime.Listener{ConnString: cfg.DatabaseURL, Hub: a.Hub, Origin: instance, Logger: log}
+	a.listener = &realtime.Listener{ConnString: cfg.DatabaseURL, Hub: a.Hub, Origin: instance, Logger: log, OnListen: opt.OnListen}
 	a.Svc.OnChange(func(ch service.Change) {
 		// Called after commit on the request goroutine: local hub right away, other instances via NOTIFY.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -237,10 +244,17 @@ func (a *App) Run(ctx context.Context) {
 	wg.Wait()
 }
 
+// Listen runs only the LISTEN/NOTIFY listener until ctx ends (tests; Run includes it).
+func (a *App) Listen(ctx context.Context) error { return a.listener.Run(ctx) }
+
+// DispatchOnce sends one batch of due outbox rows (tests; Run includes the dispatcher).
+func (a *App) DispatchOnce(ctx context.Context) (int, error) { return a.dispatcher.RunOnce(ctx) }
+
 // RunRetention runs every retention task once, on one instance at a time (session advisory lock): evidence photos
-// 90 days after the booking finished (F3.6), KYC files 30 days after the decision, KYC rows of deleted accounts,
-// expired sessions and OTP challenges, idempotency keys older than 24 hours (and the change log), and read
-// notifications older than 180 days.
+// 90 days after the booking finished (F3.6), KYC files 30 days after the decision, identity data of deleted accounts,
+// expired sessions and OTP challenges, idempotency keys older than 24 hours (and the change log), read
+// notifications older than 180 days and delivered/dead outbox rows older than 30 days. It also alerts the admins
+// about KYC submissions waiting longer than 48 hours.
 func (a *App) RunRetention(ctx context.Context) error {
 	_, err := db.WithSessionLock(ctx, a.Pool, db.LockRetention, func(ctx context.Context) error {
 		var errs []error
@@ -266,7 +280,18 @@ func (a *App) RunRetention(ctx context.Context) error {
 			n, err := a.KYC.PurgeFiles(ctx, real)
 			return int64(n), err
 		})
-		step("kyc-deleted-accounts", func() (int64, error) { return a.Svc.PurgeDeletedAccountsKYC(ctx) })
+		step("kyc-deleted-accounts", func() (int64, error) {
+			ids, err := a.Svc.DeletedAccountsWithKYC(ctx)
+			var n int64
+			for _, id := range ids {
+				k, eerr := a.KYC.EraseUser(ctx, id)
+				n += int64(k)
+				err = errors.Join(err, eerr)
+			}
+			return n, err
+		})
+		step("kyc-stale-alert", func() (int64, error) { return a.Svc.AlertStaleKYC(ctx, real) })
+		step("outbox", func() (int64, error) { return a.Svc.PurgeOutbox(ctx, real) })
 		step("sessions", func() (int64, error) { return a.Auth.PurgeExpiredSessions(ctx, real.Add(-7*24*time.Hour)) })
 		step("otp", func() (int64, error) { return a.Auth.PurgeOTPChallenges(ctx, real.Add(-24*time.Hour)) })
 		step("idempotency", func() (int64, error) { return 0, a.Svc.Housekeeping(ctx) })

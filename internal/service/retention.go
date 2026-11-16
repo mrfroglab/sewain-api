@@ -127,10 +127,61 @@ func (s *Service) PurgeReadNotifications(ctx context.Context, now time.Time) (in
 	return tag.RowsAffected(), err
 }
 
-// PurgeDeletedAccountsKYC removes KYC submission rows (encrypted NIK + name) of deleted accounts once their files are
-// purged. Identities of deleted accounts were already removed when the account was deleted.
-func (s *Service) PurgeDeletedAccountsKYC(ctx context.Context) (int64, error) {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM kyc_submissions k USING users u
-		WHERE u.id = k.user_id AND u.deleted_at IS NOT NULL AND k.status <> 'pending' AND k.ktp_object IS NULL AND k.selfie_object IS NULL`)
+// DeletedAccountsWithKYC lists deleted accounts that still have KYC rows (the erase after DELETE /api/v1/me failed or
+// predates it); the retention runner erases them with kyc.EraseUser.
+func (s *Service) DeletedAccountsWithKYC(ctx context.Context) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT u.id FROM users u
+		WHERE u.deleted_at IS NOT NULL AND (EXISTS (SELECT 1 FROM kyc_submissions k WHERE k.user_id = u.id)
+		   OR EXISTS (SELECT 1 FROM identities i WHERE i.user_id = u.id)) ORDER BY u.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// OutboxRetention: delivered or dead outbox rows (they hold e-mail addresses and texts) are kept 30 days (review L4).
+const OutboxRetention = 30 * 24 * time.Hour
+
+// PurgeOutbox deletes sent/dead notification_outbox rows older than OutboxRetention (real clock).
+func (s *Service) PurgeOutbox(ctx context.Context, now time.Time) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM notification_outbox WHERE status IN ('sent', 'dead') AND updated_at < $1`, now.Add(-OutboxRetention))
 	return tag.RowsAffected(), err
+}
+
+// StaleKYCAfter: a KYC submission waiting longer than this alerts the admins (review L5); at most one alert a day.
+const StaleKYCAfter = 48 * time.Hour
+
+type kycAlertSetting struct {
+	At int64 `json:"at"` // real time (ms) of the last alert
+}
+
+// AlertStaleKYC notifies the admin queue when submissions wait longer than StaleKYCAfter (real clock). Returns how
+// many are waiting (0 when nothing was sent).
+func (s *Service) AlertStaleKYC(ctx context.Context, now time.Time) (int64, error) {
+	var waiting int64
+	_, err := s.run(ctx, func(t *txn) error {
+		if err := t.tx.QueryRow(t.ctx, `SELECT count(*) FROM kyc_submissions WHERE status = 'pending' AND created_at < $1`,
+			now.Add(-StaleKYCAfter)).Scan(&waiting); !t.check(err) || waiting == 0 {
+			return nil
+		}
+		last, err := getSetting[kycAlertSetting](t.ctx, t.q, "kyc_stale_alert")
+		if !t.check(err) || now.Sub(time.UnixMilli(last.At)) < 24*time.Hour {
+			waiting = 0
+			return nil
+		}
+		t.check(putSetting(t.ctx, t.q, "kyc_stale_alert", kycAlertSetting{At: now.UnixMilli()}))
+		t.notify(domain.AdminID, "verifikasi", "Verifikasi menunggu lebih dari 48 jam",
+			fmt.Sprintf("%d pengajuan KTP + selfie belum diputuskan. Cek antrean verifikasi, ya.", waiting), "/admin/verifikasi")
+		return nil
+	})
+	return waiting, err
 }
