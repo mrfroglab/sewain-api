@@ -45,6 +45,9 @@ func (t *txn) createBooking(renterID domain.ID, in domain.BookingInput, wantID s
 	if in.StartDate < domain.IsoDate(t.now) {
 		return "", domain.Fail("Tanggal ambil sudah lewat.")
 	}
+	if in.EndDate > domain.AddDays(domain.IsoDate(t.now), domain.MaxRentalDays) {
+		return "", domain.Fail(fmt.Sprintf("Tanggal sewa maksimal %d hari dari sekarang.", domain.MaxRentalDays))
+	}
 	var collateral *domain.CollateralOption
 	for i := range l.CollateralOptions {
 		if l.CollateralOptions[i].ID == in.CollateralOptionID {
