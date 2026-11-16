@@ -154,6 +154,9 @@ func (s *Service) DeleteAccount(ctx context.Context, userID string) (Change, err
 		}{
 			{`UPDATE users SET name = $2, nickname = NULL, phone = '', phone_verified_at = NULL, email = NULL, bio = NULL, campus = NULL,
 			    nik_masked = NULL, demo = NULL, deleted_at = $3, updated_at = now() WHERE id = $1`, []any{userID, DeletedUserName, tsOf(t.now)}},
+			// The verification history stays (admin queue, audit) without the identity it held (UU PDP).
+			{`UPDATE verification_requests SET name_on_ktp = '', nik_masked = '', updated_at = now() WHERE user_id = $1`, []any{userID}},
+			{`DELETE FROM idempotency_keys WHERE user_id = $1`, []any{userID}},
 			{`DELETE FROM stores WHERE user_id = $1`, []any{userID}},
 			{`DELETE FROM auth_sessions WHERE user_id = $1`, []any{userID}},
 			{`DELETE FROM push_subscriptions WHERE user_id = $1`, []any{userID}},
