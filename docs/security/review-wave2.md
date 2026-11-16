@@ -15,6 +15,7 @@ Severity sama dengan gelombang 1: **tinggi** = bisa dieksploitasi dari luar tanp
 **Info** = pengerasan atau catatan.
 
 Hasil: **tidak ada temuan tinggi**. Sembilan temuan sedang dan tiga rendah diperbaiki; sisanya rendah/info dan dicatat.
+Tindak lanjut worker `polish` (§5): L1, L2, L3, L4, L6, dan I1 kini diperbaiki. L5 dan I2 tetap diterima.
 
 ## 1. Tabel temuan
 
@@ -32,13 +33,13 @@ Hasil: **tidak ada temuan tinggi**. Sembilan temuan sedang dan tiga rendah diper
 | R1 | aksi booking/job | rendah | `acceptBooking` hanya memeriksa status `REQUESTED`, bukan `expires_at`. | Antara `expires_at` dan job berikutnya (interval 15 s, runner mati, banyak instance) penyedia masih bisa menyetujui request yang menurut FR-R3 sudah kedaluwarsa. | diperbaiki: "Request ini sudah kedaluwarsa." | `3405dea` |
 | D1 | hapus akun (UU PDP) | rendah | `DELETE /api/v1/me` mengosongkan `users.nik_masked` tetapi `verification_requests` tetap menyimpan nama di KTP dan NIK tersamar. | Admin (dan ekspor admin) tetap melihat identitas akun yang sudah dihapus. | diperbaiki: `name_on_ktp`/`nik_masked` dikosongkan (riwayat tetap ada), `idempotency_keys` user dihapus. | `3df25c8` |
 | W1 | aksi papan permintaan | rendah | `offerWanted` menerima `listingId` apa pun. | Menawarkan listing penyedia lain (peminta diarahkan ke listing itu atas nama penawar), atau listing tersembunyi/tak ada. | diperbaiki: hanya listing aktif milik sendiri. | `d442b1b` |
-| L1 | aksi admin | rendah | `adminRecommend`/`resolveDispute`/`resolveReport`/`reviewVerification` (simulasi) tidak memeriksa status sebelumnya; `updateCommission` menerima `min > max` dan `min` negatif. | Hanya admin: sengketa yang sudah selesai bisa "dibuka" lagi ke mediasi, laporan diputus dua kali, komisi dengan min > max (hasil = max). | terbuka (admin tepercaya, tercatat di audit). Saran: tolak aksi atas entitas yang sudah final; validasi `0 ≤ min ≤ max`. | – |
-| L2 | input | rendah | Teks bebas di luar listing tanpa batas panjang selain body limit: pesan chat, alasan pembatalan/penolakan, deskripsi sengketa, catatan usulan, laporan, papan permintaan; `proposeSolution.amount` dan `wanted.budgetPerDay` boleh negatif/raksasa; `createReport` tidak memeriksa target ada. | Penyimpanan membengkak dan notifikasi panjang (dibatasi `BodyLimit` 1 MB per request + rate limit write). | terbuka. Saran: batas 2.000 karakter untuk pesan/catatan, nominal 0–`MaxRupiah`, target laporan wajib ada. | – |
-| L3 | moderasi | rendah | Filter kata belum menangani leetspeak (`4irs0ft`, `a1rsoft`) dan homoglif di luar tabel. | Bisa dilewati dengan sedikit usaha; filter ini garis pertama, laporan pengguna + admin tetap jalan. | diterima. Saran: tambahkan varian ke daftar kata admin bila muncul. | – |
-| L4 | listing | rendah | `listing.photos` berisi string bebas (URL absolut pun diterima), juga lewat impor CSV. | Pemilik listing memasang URL eksternal sebagai foto → browser setiap pengunjung memuat gambar dari server penyerang (pelacakan IP), dan gambar tidak lewat `media.Inspect`. Tergantung CSP `img-src` web. | terbuka. Saran: hanya `/api/v1/photos/<id>` (foto `referensi` milik pemilik) atau `/img/…`; pastikan CSP web `img-src 'self'`. | – |
+| L1 | aksi admin | rendah | `adminRecommend`/`resolveDispute`/`resolveReport`/`reviewVerification` (simulasi) tidak memeriksa status sebelumnya; `updateCommission` menerima `min > max` dan `min` negatif. | Hanya admin: sengketa yang sudah selesai bisa "dibuka" lagi ke mediasi, laporan diputus dua kali, komisi dengan min > max (hasil = max). | diperbaiki (polish): rekomendasi/hasil atas sengketa `selesai`, keputusan kedua atas laporan/pengajuan verifikasi ditolak dengan pesan jelas; komisi menolak `min > max`, nominal negatif, dan di atas `MaxRupiah`. | `613484e` |
+| L2 | input | rendah | Teks bebas di luar listing tanpa batas panjang selain body limit: pesan chat, alasan pembatalan/penolakan, deskripsi sengketa, catatan usulan, laporan, papan permintaan; `proposeSolution.amount` dan `wanted.budgetPerDay` boleh negatif/raksasa; `createReport` tidak memeriksa target ada. | Penyimpanan membengkak dan notifikasi panjang (dibatasi `BodyLimit` 1 MB per request + rate limit write). | diperbaiki (polish): batas panjang (`domain/limits.go`) untuk pesan chat, ulasan, catatan booking, alasan tolak/batal/lapor/strike/status, deskripsi sengketa, usulan, rekomendasi/hasil admin, papan permintaan + tawaran, nama, bio, nama toko; nominal usulan dibatasi PRD §11.3 (potong deposit ≤ deposit, ganti perbaikan/nilai ≤ nilai barang di kesepakatan, tanpa kompensasi tanpa nominal, tidak negatif), rekomendasi admin ≤ maks(nilai barang, deposit); `budgetPerDay` 0–`MaxRupiah`; target laporan wajib ada. | `613484e` |
+| L3 | moderasi | rendah | Filter kata belum menangani leetspeak (`4irs0ft`, `a1rsoft`) dan homoglif di luar tabel. | Bisa dilewati dengan sedikit usaha; filter ini garis pertama, laporan pengguna + admin tetap jalan. | diperbaiki (polish): normalisasi sederhana di dalam kata yang memuat huruf (0→o, 1→i/l, 3→e, 4→a, 5→s, 7→t) + huruf berulang dipadatkan. Angka berdiri sendiri tidak diubah. Semua judul/deskripsi/catatan seed jadi tes negatif. Homoglif di luar tabel tetap lewat laporan + admin. | `c77aa03` |
+| L4 | listing | rendah | `listing.photos` berisi string bebas (URL absolut pun diterima), juga lewat impor CSV. | Pemilik listing memasang URL eksternal sebagai foto → browser setiap pengunjung memuat gambar dari server penyerang (pelacakan IP), dan gambar tidak lewat `media.Inspect`. Tergantung CSP `img-src` web. | diperbaiki (polish): `createListing`/`updateListing`/impor CSV hanya menerima `/api/v1/photos/<id>` atau id foto tahap `referensi` yang diunggah pemilik (atau admin yang mengedit/mengimpor), dan `/img/…` hanya di DEMO_MODE. Foto yang sudah ada di listing tetap boleh dipertahankan. URL luar, `//host`, `data:`, query string ditolak. Tanpa migrasi data (lihat §5). | `a61ca8b` |
 | L5 | hapus akun | rendah | Race sempit: `createBooking` yang sedang memegang kunci listing saat `DeleteAccount` berjalan masih bisa commit setelah pengecekan "tidak ada booking berjalan". | Akun terhapus dengan satu booking `REQUESTED` (kedaluwarsa sendiri 24 jam kemudian). | diterima. | – |
-| L6 | platform (tune-limits) | rendah | Sejak `a329922` limit publik berjalan **setelah** `auth.Middleware`. | Request dengan token/cookie acak memicu lookup sesi di DB sebelum ada limit per-IP. Lookup memakai indeks unik (murah), tetapi tidak ada rem sama sekali di depannya. | terbuka. Saran: limit per-IP longgar (mis. 5× profil publik) sebelum auth, atau limit khusus untuk kredensial tidak valid. | – |
-| I1 | impor CSV | info | Impor menerima serah terima `antar`, sedangkan web memakai `cod/jemput/kurir`. | Listing hasil impor dengan `antar` tidak cocok dengan opsi web. | catatan: validasi domain menerima keduanya; samakan kosakata impor dengan web. | – |
+| L6 | platform (tune-limits) | rendah | Sejak `a329922` limit publik berjalan **setelah** `auth.Middleware`. | Request dengan token/cookie acak memicu lookup sesi di DB sebelum ada limit per-IP. Lookup memakai indeks unik (murah), tetapi tidak ada rem sama sekali di depannya. | diperbaiki (polish): profil `ip` (6000/menit, burst 3000, `RATE_IP_PER_MIN`/`RATE_IP_BURST`) dipasang sebelum `auth.Middleware`. | `07eaa82` |
+| I1 | impor CSV | info | Impor menerima serah terima `antar`, sedangkan web memakai `cod/jemput/kurir`. | Listing hasil impor dengan `antar` tidak cocok dengan opsi web. | diperbaiki (polish): satu daftar `domain.HandoverMethods` (`cod`, `jemput`, `kurir`, `antar`, sama dengan `HandoverMethod` web) untuk validasi listing dan impor; impor kini menerima `kurir` dan tidak peka huruf besar. | `8a5eade` |
 | I2 | realtime | info | WebSocket yang sudah terbuka tetap menerima event `changed` setelah sesi dicabut (blacklist/hapus akun) sampai tersambung ulang. | Hanya nomor versi, tanpa data; snapshot sesudahnya ditolak sebagai tamu. | diterima. | – |
 
 ## 2. Dampak perubahan untuk web dan operator
@@ -161,3 +162,33 @@ make generate-check                                       # tanpa diff
 | R1 | `TestAcceptAfterExpiryRefused` |
 | D1 | `TestDeleteAccountErasesVerificationRequests` |
 | W1 | `TestOfferWantedOnlyOwnListing` |
+
+## 5. Tindak lanjut (worker `polish`, sebelum go-live)
+
+| Temuan | Status | Tes (gagal di kode lama, lulus sesudahnya) |
+|---|---|---|
+| L1 | diperbaiki | `TestAdminActionsOnFinalEntities`, `TestUpdateCommissionBounds` |
+| L2 | diperbaiki | `TestFreeTextLimits`, `TestProposalAmountBounds` |
+| L3 | diperbaiki (normalisasi sederhana) | `TestBannedKeywordsLeetspeak`, `TestBannedKeywordsNoFalsePositiveOnSeed` (internal/domain) |
+| L4 | diperbaiki | `TestListingPhotosMustBeOwnUploads` |
+| L5 | diterima (tidak berubah) | – |
+| L6 | diperbaiki | `TestIPBrakeBeforeAuth` (ratelimit), `TestFakeTokenFloodStopsBeforeAuth` (app); `TestCampusNATDefaults` dan `TestCampusNATNoFalsePositives` tetap lulus |
+| I1 | diperbaiki | `TestImportHandoverMethods` |
+| I2 | diterima (tidak berubah) | – |
+| `DELETE /api/v1/me` | sudah benar, kini diuji lewat HTTP | `TestDeleteAccountBlockedUntilSettled` (409 saat sewa berjalan / sengketa terbuka, 200 setelah dibatalkan / diselesaikan) |
+
+Catatan:
+
+- **L1 jalur KYC.** `reviewVerification` atas pengajuan yang punya `kyc_submission_id` diteruskan ke `kyc.Decide`,
+  yang sudah menolak keputusan kedua (`curStatus != pending`). Perbaikan L1 menutup jalur simulasi/manual.
+- **L2 dampak web.** Batas sama dengan form web atau lebih longgar. Pesan galat: "`<Kolom>` terlalu panjang (maks N
+  karakter)." Usulan "potong deposit" pada booking tanpa deposit ditolak ("Booking ini tidak memakai deposit."), sama
+  dengan `ProposalSheet` web yang menonaktifkan pilihan itu. "Perpanjang" dibatasi nilai barang.
+- **L3 dampak web.** Filter di web (konfigurasi `bannedKeywords`) belum memakai normalisasi ini, jadi server bisa
+  menolak judul yang lolos di klien. Pesannya tetap "Ada kata yang dilarang: …".
+- **L4 tanpa migrasi data.** Listing lama yang sudah memuat URL luar (hanya mungkin lewat impor CSV atau aksi API
+  langsung sebelum perbaikan) tetap tampil sampai diedit. Saat diedit, URL luar ditolak walaupun sudah ada. Cek
+  sebelum go-live: `SELECT listing_id, src FROM listing_photos WHERE src NOT LIKE '/api/v1/photos/%' AND src NOT LIKE '/img/%';`.
+  Kalau ada hasilnya, turunkan listing itu atau hapus fotonya secara manual. Migrasi otomatis tidak dibuat karena
+  bisa membuat listing kurang dari 3 foto tanpa sepengetahuan pemilik.
+- **L6.** Respons 429 dari rem ini dihitung di `sewain_rate_limited_total{profile="ip"}`.
