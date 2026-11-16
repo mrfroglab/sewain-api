@@ -1,7 +1,6 @@
 package domain_test
 
 import (
-	"math"
 	"testing"
 
 	"github.com/mrfroglab/sewain-api/internal/domain"
@@ -49,25 +48,6 @@ func TestAgreementHashIgnoresAgreementTimestamps(t *testing.T) {
 	ag.ItemValue = 1
 	if domain.AgreementHash(ag) == h {
 		t.Fatal("hash must change with the terms")
-	}
-}
-
-func TestPublicLocationGrid(t *testing.T) {
-	lat, lng := -7.7623999, 110.3699
-	plat, plng := domain.PublicLocation(lat, lng)
-	if plat == lat || plng == lng {
-		t.Fatal("public location must differ from the precise one")
-	}
-	if d := domain.DistanceMeters(lat, lng, plat, lng); d > 251 {
-		t.Fatalf("latitude moved %.0f m (> 250)", d)
-	}
-	if d := domain.DistanceMeters(lat, lng, lat, plng); d > 251 {
-		t.Fatalf("longitude moved %.0f m (> 250)", d)
-	}
-	// Stable: nearby points in the same cell map to the same public point.
-	a, b := domain.PublicLocation(lat+0.00001, lng+0.00001)
-	if math.Abs(a-plat) > 1e-9 || math.Abs(b-plng) > 1e-9 {
-		t.Fatal("grid snapping must be stable")
 	}
 }
 

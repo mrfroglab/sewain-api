@@ -95,6 +95,9 @@ func Normalize(d *Data) {
 	if d.ChatReads == nil {
 		d.ChatReads = map[string]int64{}
 	}
+	if d.ListingBusy == nil {
+		d.ListingBusy = map[ID][]BusyRange{}
+	}
 	if d.BannedKeywords == nil {
 		d.BannedKeywords = []string{}
 	}
