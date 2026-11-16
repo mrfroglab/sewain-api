@@ -188,7 +188,7 @@ func TestMiddlewareFailsOpen(t *testing.T) {
 
 func TestProfiles(t *testing.T) {
 	// Pilot defaults (campus NAT, docs/integration/ops.md §2): limit, burst.
-	want := map[string][2]int{"public": {1200, 300}, "write": {120, 40}, "upload": {30, 10}, "auth": {60, 20}, "demo": {600, 100}}
+	want := map[string][2]int{"ip": {6000, 3000}, "public": {1200, 300}, "write": {120, 40}, "upload": {30, 10}, "auth": {60, 20}, "demo": {600, 100}}
 	ps := Profiles()
 	if len(ps) != len(want) {
 		t.Fatalf("%d profiles", len(ps))
@@ -204,7 +204,7 @@ func TestProfiles(t *testing.T) {
 func TestRatesWithDefaults(t *testing.T) {
 	r := Rates{Write: Rate{Limit: 10, Burst: 2}, Upload: Rate{Limit: 0, Burst: 99}}.WithDefaults()
 	d := DefaultRates()
-	if r.Public != d.Public || r.Auth != d.Auth || r.Demo != d.Demo || r.Upload != d.Upload {
+	if r.IP != d.IP || r.Public != d.Public || r.Auth != d.Auth || r.Demo != d.Demo || r.Upload != d.Upload {
 		t.Fatalf("unset rates not defaulted: %+v", r)
 	}
 	if r.Write != (Rate{Limit: 10, Per: time.Minute, Burst: 2}) {
@@ -215,12 +215,13 @@ func TestRatesWithDefaults(t *testing.T) {
 	}
 }
 
-// campusChain mirrors the production wiring (internal/httpapi): the global public profile after the viewer is
-// known, then the per-route write/upload profile.
+// campusChain mirrors the production wiring (internal/httpapi): the per-IP brake before authentication, the global
+// public profile after the viewer is known, then the per-route write/upload profile.
 func campusChain(m Limiter) (state, action, upload http.Handler) {
 	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	public := Middleware(m, Public, Options{})
-	return public(ok), public(Middleware(m, Write, Options{})(ok)), public(Middleware(m, Upload, Options{})(ok))
+	brake, public := Middleware(m, IP, Options{}), Middleware(m, Public, Options{})
+	chain := func(h http.Handler) http.Handler { return brake(public(h)) }
+	return chain(ok), chain(Middleware(m, Write, Options{})(ok)), chain(Middleware(m, Upload, Options{})(ok))
 }
 
 // A campus NAT: 300 signed-in students behind one IP, each loading the snapshot, doing 5 actions and uploading
@@ -337,5 +338,37 @@ func TestIPBucket(t *testing.T) {
 		if got := IPBucket(in); got != want {
 			t.Errorf("IPBucket(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// Review wave 2, L6: the per-IP brake sits in front of authentication. A flood of made-up tokens from one IP (each a
+// different "user" as far as the attacker is concerned, but no user to the server) reaches the session lookup at most
+// burst + refill times; past that it is refused without calling the next handler.
+func TestIPBrakeBeforeAuth(t *testing.T) {
+	clk := newClock()
+	m := NewMemory(MemoryOptions{Now: clk.Now})
+	lookups := 0
+	auth := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { lookups++; w.WriteHeader(http.StatusOK) })
+	h := Middleware(m, IP, Options{})(auth)
+	const ip = "198.51.100.7"
+	limited := 0
+	for range 10_000 {
+		if serve(h, ip, "").Code == http.StatusTooManyRequests {
+			limited++
+		}
+	}
+	if lookups != IP.Rate.Burst || limited != 10_000-IP.Rate.Burst {
+		t.Fatalf("lookups %d, limited %d (burst %d)", lookups, limited, IP.Rate.Burst)
+	}
+	clk.Advance(time.Second) // 6000/min = 100 per second
+	for range 200 {
+		serve(h, ip, "")
+	}
+	if lookups != IP.Rate.Burst+100 {
+		t.Fatalf("after one second: %d lookups", lookups)
+	}
+	// Another address is unaffected.
+	if serve(h, "198.51.100.8", "").Code != http.StatusOK {
+		t.Fatal("other IP limited")
 	}
 }

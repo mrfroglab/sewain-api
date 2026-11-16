@@ -69,6 +69,11 @@ type Profile struct {
 // Signed-in traffic is keyed per user wherever possible, so an IP shared by many students does not share
 // one bucket. Every rate can be overridden from the environment (see Rates and config.Config.Rates).
 var (
+	// IP: the cheap per-IP brake in front of authentication (review wave 2, L6). Only the address is looked at,
+	// so a flood of made-up tokens or cookies from one IP stops here before it costs a session lookup. It is far
+	// above anything a campus NAT produces (300 students ≈ 3.600 requests a minute in the load test); the finer
+	// per-user limits behind it still apply.
+	IP = Profile{Name: "ip", Rate: DefaultRates().IP, Key: ByIP}
 	// Public: the coarse limit on every route, keyed per signed-in user and per IP for guests (ByUser).
 	// 1200/min per guest IP lets a crowd of anonymous visitors behind one NAT browse; a single flooding IP
 	// still hits it.
@@ -87,13 +92,14 @@ var (
 
 // Rates are the configurable rates of the built-in profiles.
 type Rates struct {
-	Public, Write, Upload, Auth, Demo Rate
+	IP, Public, Write, Upload, Auth, Demo Rate
 }
 
 // DefaultRates returns the pilot defaults (docs/integration/ops.md §2).
 func DefaultRates() Rates {
 	perMin := func(limit, burst int) Rate { return Rate{Limit: limit, Per: time.Minute, Burst: burst} }
 	return Rates{
+		IP:     perMin(6000, 3000),
 		Public: perMin(1200, 300),
 		Write:  perMin(120, 40),
 		Upload: perMin(30, 10),
@@ -115,6 +121,7 @@ func (r Rates) WithDefaults() Rates {
 		return v
 	}
 	return Rates{
+		IP:     pick(r.IP, d.IP),
 		Public: pick(r.Public, d.Public),
 		Write:  pick(r.Write, d.Write),
 		Upload: pick(r.Upload, d.Upload),
@@ -130,7 +137,7 @@ func (p Profile) With(r Rate) Profile {
 }
 
 // Profiles lists the built-in profiles with their default rates.
-func Profiles() []Profile { return []Profile{Public, Write, Upload, Auth, Demo} }
+func Profiles() []Profile { return []Profile{IP, Public, Write, Upload, Auth, Demo} }
 
 // Options tunes Middleware.
 type Options struct {

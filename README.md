@@ -146,6 +146,7 @@ Contoh lengkap: [`deploy/.env.example`](deploy/.env.example). Kolom "Prod" = waj
 | `OTP_MAX_PER_PHONE_HOUR` | – | `5` | Kode OTP per nomor per jam |
 | `OTP_MAX_PER_IP_HOUR` | – | `200` | Kode OTP per IP (IPv6 per /64) per jam. Tinggi karena NAT kampus |
 | `OTP_MAX_SENDS_PER_DAY` | – | `2000` | Plafon global kode terkirim per hari WIB (anti SMS/WA pumping). Tercapai → OTP ditolak sampai 00.00 WIB, log `WARN`, satu notifikasi ke admin |
+| `RATE_IP_PER_MIN`, `RATE_IP_BURST` | – | `6000`, `3000` | Rem murah per IP **sebelum** auth (token/cookie palsu tidak memicu lookup sesi). Jauh di atas lalu lintas NAT kampus |
 | `RATE_PUBLIC_PER_MIN`, `RATE_PUBLIC_BURST` | – | `1200`, `300` | Batas global semua rute, per user (tamu per IP) |
 | `RATE_WRITE_PER_MIN`, `RATE_WRITE_BURST` | – | `120`, `40` | Aksi dan mutasi lain, per user (tamu per IP) |
 | `RATE_UPLOAD_PER_MIN`, `RATE_UPLOAD_BURST` | – | `30`, `10` | Unggah foto/KYC, per user |

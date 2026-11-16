@@ -234,7 +234,7 @@ func rates(getenv func(string) string, fail func(string, ...any)) ratelimit.Rate
 	for _, p := range []struct {
 		env  string
 		rate *ratelimit.Rate
-	}{{"PUBLIC", &r.Public}, {"WRITE", &r.Write}, {"UPLOAD", &r.Upload}, {"AUTH", &r.Auth}, {"DEMO", &r.Demo}} {
+	}{{"IP", &r.IP}, {"PUBLIC", &r.Public}, {"WRITE", &r.Write}, {"UPLOAD", &r.Upload}, {"AUTH", &r.Auth}, {"DEMO", &r.Demo}} {
 		if n, ok := PositiveInt(getenv, "RATE_"+p.env+"_PER_MIN", MaxRateValue, fail); ok {
 			p.rate.Limit = n
 		}

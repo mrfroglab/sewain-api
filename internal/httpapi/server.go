@@ -45,13 +45,14 @@ type Deps struct {
 
 // RateProfiles are the per-route rate limits (docs/integration/ops.md §2). Zero values use the ratelimit defaults.
 type RateProfiles struct {
-	Public, Write, Upload, Auth, Demo ratelimit.Profile
+	IP, Public, Write, Upload, Auth, Demo ratelimit.Profile
 }
 
 // ProfilesFromRates builds the built-in profiles (names and keys) with the configured rates (RATE_* env).
 func ProfilesFromRates(r ratelimit.Rates) RateProfiles {
 	r = r.WithDefaults()
 	return RateProfiles{
+		IP:     ratelimit.IP.With(r.IP),
 		Public: ratelimit.Public.With(r.Public),
 		Write:  ratelimit.Write.With(r.Write),
 		Upload: ratelimit.Upload.With(r.Upload),
@@ -61,6 +62,9 @@ func ProfilesFromRates(r ratelimit.Rates) RateProfiles {
 }
 
 func (p RateProfiles) withDefaults() RateProfiles {
+	if p.IP.Name == "" {
+		p.IP = ratelimit.IP
+	}
 	if p.Public.Name == "" {
 		p.Public = ratelimit.Public
 	}
@@ -194,6 +198,9 @@ func (s *Server) Routes() http.Handler {
 		middleware.Timeout(s.cfg.RequestTimeout, middleware.TimeoutOptions{}),
 		clientAddr,
 		s.wsQueryToken,
+		// Cheap per-IP brake before any session lookup (review wave 2, L6): made-up tokens from one address stop
+		// here. Generous enough for a campus NAT.
+		rl(d.Profiles.IP),
 		d.Auth.Middleware, // also records the user for logs and per-user rate limits (middleware.SetUserID)
 		// The coarse limit on every route runs after the viewer is resolved so signed-in students behind one campus
 		// NAT each get their own bucket; guests (and invalid tokens) share the bucket of their IP.
