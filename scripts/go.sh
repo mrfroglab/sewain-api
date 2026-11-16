@@ -10,7 +10,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-GO_IMAGE="${GO_IMAGE:-golang:1.27.3}"
+GO_IMAGE="${GO_IMAGE:-golang:1.27.4}"
 CACHE_VOLUME="${GO_CACHE_VOLUME:-sewain-go-cache}"
 
 # Volume cache bersama (modul + build) dibuat sekali dan dimiliki user kita.
