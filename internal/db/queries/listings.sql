@@ -81,9 +81,11 @@ VALUES (@listing_id, @id, @position, @kind, @cards, @deposit_mode, @deposit_amou
   @description, @estimated_value);
 
 -- name: CountCommittedOverlaps :one
--- FR-R4: bookings that hold stock (ACCEPTED/ACTIVE) on overlapping dates.
+-- FR-R4: bookings that hold stock on overlapping dates: ACCEPTED/ACTIVE, and DISPUTED while the item is still with the
+-- renter (not returned), like listingBusy in the snapshot.
 SELECT count(*)::int FROM bookings
-WHERE listing_id = @listing_id AND status IN ('ACCEPTED', 'ACTIVE') AND id <> @exclude_id
+WHERE listing_id = @listing_id AND (status IN ('ACCEPTED', 'ACTIVE') OR (status = 'DISPUTED' AND returned_at IS NULL))
+  AND id <> @exclude_id
   AND start_date <= @end_date AND @start_date <= end_date;
 
 -- name: ListFavorites :many
