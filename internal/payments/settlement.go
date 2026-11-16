@@ -62,7 +62,7 @@ type Outcome struct {
 	RentRefund int64 // optional partial rent refund out of escrow for non-cancel cases
 }
 
-// Settlement is the plan for one booking. Entries sum to zero; the amounts summarise them.
+// Settlement is the plan for one booking. Entries sum to zero; the amounts summarize them.
 type Settlement struct {
 	Entries            []Entry
 	DepositToProvider  int64 // part of the deposit awarded to the provider

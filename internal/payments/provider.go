@@ -105,7 +105,7 @@ type PayoutResult struct {
 	Status      string // submitted | succeeded | failed
 }
 
-// Event is a verified, normalised webhook.
+// Event is a verified, normalized webhook.
 type Event struct {
 	ID          string // unique per provider (idempotency key)
 	Type        string // Event* constant
@@ -131,7 +131,7 @@ type Provider interface {
 	GetStatus(ctx context.Context, providerRef string) (ChargeStatus, error)
 	Refund(ctx context.Context, req RefundRequest) (RefundResult, error)
 	Payout(ctx context.Context, req PayoutRequest) (PayoutResult, error)
-	// VerifyWebhook authenticates a callback and normalises it. body is the raw request body.
+	// VerifyWebhook authenticates a callback and normalizes it. body is the raw request body.
 	VerifyWebhook(r *http.Request, body []byte) (Event, error)
 }
 

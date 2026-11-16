@@ -100,7 +100,7 @@ func (x *Xendit) do(ctx context.Context, method, path string, headers map[string
 		}
 		body = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, x.cfg.BaseURL+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, x.cfg.BaseURL+path, body) // #nosec G704 -- operator-configured base URL
 	if err != nil {
 		return err
 	}
@@ -114,7 +114,7 @@ func (x *Xendit) do(ctx context.Context, method, path string, headers map[string
 			req.Header.Set(k, v)
 		}
 	}
-	resp, err := x.cfg.HTTP.Do(req)
+	resp, err := x.cfg.HTTP.Do(req) // #nosec G704 -- operator-configured base URL, see above
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrProviderFailed, err)
 	}
@@ -333,7 +333,7 @@ type xenditWebhook struct {
 }
 
 // VerifyWebhook implements Provider: the x-callback-token header must equal the account's token
-// (constant-time), then the v3 envelope is normalised. Xendit retries up to six times and may deliver out
+// (constant-time), then the v3 envelope is normalized. Xendit retries up to six times and may deliver out
 // of order; the event id is built from ids Xendit documents as unique (payment_id/capture_id, refund_id).
 func (x *Xendit) VerifyWebhook(r *http.Request, body []byte) (Event, error) {
 	if !tokenEqual(r.Header.Get(XenditCallbackHeader), x.cfg.CallbackToken) {

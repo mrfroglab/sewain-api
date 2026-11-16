@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// lockBooking serialises money movements of one booking.
+// lockBooking serializes money movements of one booking.
 func lockBooking(ctx context.Context, tx pgx.Tx, bookingID string) error {
 	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('payments:' || $1))`, bookingID)
 	return err
