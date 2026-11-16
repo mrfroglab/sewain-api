@@ -219,3 +219,28 @@ func TestHubCloseRefusesNewConnections(t *testing.T) {
 		t.Fatalf("after Close: err=%v resp=%v", err, resp)
 	}
 }
+
+// Finding R1: with the zero value (as wired in docs/integration/notify.md) guests were unlimited. Each
+// connection pins two goroutines, a send queue and socket buffers, so one client (or a /64 of IPv6
+// addresses) could open guest sockets until the 256 MB API container died. Guests are now capped by
+// default; a negative MaxGuestConns restores "unlimited" explicitly.
+func TestGuestConnectionsCappedByDefault(t *testing.T) {
+	h := NewHub(Options{})
+	for i := range DefaultMaxGuestConns {
+		if c, _, st := h.register("", ""); c == nil {
+			t.Fatalf("guest %d refused with %d", i, st)
+		}
+	}
+	if c, _, st := h.register("", ""); c != nil || st != http.StatusTooManyRequests {
+		t.Fatalf("guest beyond the default cap: client=%v status=%d, want 429", c != nil, st)
+	}
+	if c, _, _ := h.register("u-1", ""); c == nil {
+		t.Fatal("signed-in users are capped separately")
+	}
+	u := NewHub(Options{MaxGuestConns: -1})
+	for range DefaultMaxGuestConns + 1 {
+		if c, _, _ := u.register("", ""); c == nil {
+			t.Fatal("MaxGuestConns -1 must not cap")
+		}
+	}
+}
