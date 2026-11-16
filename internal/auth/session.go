@@ -147,11 +147,18 @@ func (s *Service) PurgeExpiredSessions(ctx context.Context, cutoff time.Time) (i
 	return tag.RowsAffected(), err
 }
 
-// PurgeOTPChallenges deletes challenges created before cutoff (keep at least one hour for rate limits).
+// PurgeOTPChallenges deletes challenges created before cutoff (keep at least 24 hours: the daily send cap counts
+// the current WIB day) and daily-cap alert markers older than 90 days.
 func (s *Service) PurgeOTPChallenges(ctx context.Context, cutoff time.Time) (int64, error) {
-	if s.now().Sub(cutoff) < time.Hour {
-		return 0, errors.New("auth: OTP purge cutoff must be at least one hour in the past")
+	if s.Now().Sub(cutoff) < 24*time.Hour { // untruncated clock: callers pass Now() - 24h
+		return 0, errors.New("auth: OTP purge cutoff must be at least 24 hours in the past")
 	}
 	tag, err := s.DB.Exec(ctx, `DELETE FROM otp_challenges WHERE created_at < $1`, cutoff)
-	return tag.RowsAffected(), err
+	if err != nil {
+		return 0, err
+	}
+	if _, err := s.DB.Exec(ctx, `DELETE FROM otp_daily_cap_alerts WHERE reached_at < $1`, s.now().Add(-90*24*time.Hour)); err != nil {
+		return tag.RowsAffected(), err
+	}
+	return tag.RowsAffected(), nil
 }

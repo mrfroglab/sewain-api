@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -46,6 +47,12 @@ type Service struct {
 	Sender Sender
 	Config Config
 	Now    func() time.Time
+	// Log receives OTP limit warnings (nil = slog.Default()).
+	Log *slog.Logger
+	// OnDailyCapReached, when set, alerts the admins that OTP_MAX_SENDS_PER_DAY was hit. It is called at most
+	// once per WIB day (day is "2006-01-02") across all instances; returning an error lets a later refused
+	// request try again.
+	OnDailyCapReached func(ctx context.Context, day string, limit int) error
 }
 
 // NewService validates the configuration and returns a Service.

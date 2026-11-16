@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"strings"
@@ -27,7 +28,10 @@ type RequestResult struct {
 }
 
 // RequestOTP issues a login code for phone. Rate limits are counted from otp_challenges inside a transaction
-// serialized by advisory locks on the phone and IP, so they hold across instances.
+// serialized by advisory locks on the phone and IP, so they hold across instances: OTPResendGap per phone, then
+// Config.OTPMaxPerPhoneHour, Config.OTPMaxPerIPHour and the service-wide Config.OTPMaxSendsPerDay (per WIB
+// calendar day). The daily cap is not serialized by a global lock (that would queue every OTP behind the gateway
+// call), so concurrent requests can overshoot it by at most the number of requests in flight.
 func (s *Service) RequestOTP(ctx context.Context, rawPhone string, meta RequestMeta) (RequestResult, error) {
 	phone, err := NormalizePhone(rawPhone)
 	if err != nil {
@@ -58,6 +62,7 @@ func (s *Service) RequestOTP(ctx context.Context, rawPhone string, meta RequestM
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('otp:ip:' || $1, 0))`, ip); err != nil {
 		return RequestResult{}, err
 	}
+	maxPhone, maxIP, maxDay := s.Config.OTPLimits()
 	hourAgo := now.Add(-time.Hour)
 	var phoneCount int
 	var lastAt *time.Time
@@ -72,7 +77,7 @@ func (s *Service) RequestOTP(ctx context.Context, rawPhone string, meta RequestM
 		return RequestResult{}, &Error{Status: http.StatusTooManyRequests, RetryAfter: wait,
 			Msg: fmt.Sprintf("Tunggu %d detik sebelum minta kode lagi.", int((wait+time.Second-1)/time.Second))}
 	}
-	if phoneCount >= OTPMaxPerPhoneHour {
+	if phoneCount >= maxPhone {
 		return RequestResult{}, &Error{Status: http.StatusTooManyRequests, RetryAfter: oldestAt.Add(time.Hour).Sub(now),
 			Msg: "Terlalu sering minta kode untuk nomor ini. Coba lagi nanti."}
 	}
@@ -84,10 +89,21 @@ func (s *Service) RequestOTP(ctx context.Context, rawPhone string, meta RequestM
 			ip, hourAgo).Scan(&ipCount, &ipOldest); err != nil {
 			return RequestResult{}, err
 		}
-		if ipCount >= OTPMaxPerIPHour {
+		if ipCount >= maxIP {
 			return RequestResult{}, &Error{Status: http.StatusTooManyRequests, RetryAfter: ipOldest.Add(time.Hour).Sub(now),
 				Msg: "Terlalu banyak permintaan kode dari jaringanmu. Coba lagi nanti."}
 		}
+	}
+	dayStart := WIBDayStart(now)
+	var sentToday int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM otp_challenges WHERE created_at >= $1`, dayStart).Scan(&sentToday); err != nil {
+		return RequestResult{}, err
+	}
+	if sentToday >= maxDay {
+		_ = tx.Rollback(ctx) // release the phone/IP locks before alerting
+		s.dailyCapReached(ctx, dayStart, maxDay, sentToday)
+		return RequestResult{}, &Error{Status: http.StatusServiceUnavailable, Code: "otp_daily_cap", RetryAfter: dayStart.Add(24 * time.Hour).Sub(now),
+			Msg: "Maaf, pengiriman kode OTP hari ini sudah mencapai batas. Coba lagi besok, ya. Kalau mendesak, hubungi admin Sewain."}
 	}
 	expires := now.Add(OTPTTL)
 	if _, err := tx.Exec(ctx, `
@@ -113,6 +129,46 @@ func (s *Service) RequestOTP(ctx context.Context, rawPhone string, meta RequestM
 	return res, nil
 }
 
+// wib is Western Indonesia Time (UTC+7, no daylight saving).
+var wib = time.FixedZone("WIB", 7*60*60)
+
+// WIBDayStart is 00:00 WIB of the calendar day containing t.
+func WIBDayStart(t time.Time) time.Time {
+	y, m, d := t.In(wib).Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, wib)
+}
+
+// dailyCapReached logs the first refusal of the day at WARN and alerts the admins once per WIB day (deduplicated
+// across instances by otp_daily_cap_alerts). A failed alert is retried by a later refused request.
+func (s *Service) dailyCapReached(ctx context.Context, dayStart time.Time, limit, sent int) {
+	log := s.logger()
+	day := dayStart.Format(time.DateOnly)
+	// The alert must not depend on the client staying connected.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	tag, err := s.DB.Exec(ctx, `INSERT INTO otp_daily_cap_alerts (day, cap, reached_at) VALUES ($1::date, $2, $3)
+		ON CONFLICT (day) DO NOTHING`, day, limit, s.now())
+	if err != nil {
+		log.ErrorContext(ctx, "otp daily cap: record alert", "err", err)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		log.DebugContext(ctx, "otp request refused: daily send cap reached", "day", day, "cap", limit)
+		return
+	}
+	log.WarnContext(ctx, "OTP daily send cap reached: refusing every OTP request until 00:00 WIB (possible SMS/WA pumping; raise OTP_MAX_SENDS_PER_DAY if the traffic is genuine)",
+		"day", day, "cap", limit, "sent", sent)
+	if s.OnDailyCapReached == nil {
+		return
+	}
+	if err := s.OnDailyCapReached(ctx, day, limit); err != nil {
+		log.ErrorContext(ctx, "otp daily cap: alert admins", "err", err)
+		if _, err := s.DB.Exec(ctx, `DELETE FROM otp_daily_cap_alerts WHERE day = $1::date`, day); err != nil {
+			log.ErrorContext(ctx, "otp daily cap: reset alert", "err", err)
+		}
+	}
+}
+
 func (s *Service) newCode() (string, error) {
 	if f, ok := s.Sender.(FixedCoder); ok {
 		return f.FixedCode(), nil
@@ -122,6 +178,13 @@ func (s *Service) newCode() (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%06d", n.Int64()), nil
+}
+
+func (s *Service) logger() *slog.Logger {
+	if s.Log != nil {
+		return s.Log
+	}
+	return slog.Default()
 }
 
 func (s *Service) codeHash(id, phone, code string) []byte {

@@ -444,6 +444,12 @@ type OtpChallenge struct {
 	ConsumedAt *time.Time
 }
 
+type OtpDailyCapAlert struct {
+	Day       time.Time
+	Cap       int
+	ReachedAt time.Time
+}
+
 type Photo struct {
 	ID         string
 	Ord        int64

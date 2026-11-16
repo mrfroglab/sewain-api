@@ -89,7 +89,7 @@ func TestOTPResendGapAndPerPhoneLimit(t *testing.T) {
 	if ue.RetryAfter <= 0 || ue.RetryAfter > auth.OTPResendGap {
 		t.Fatalf("retryAfter = %v", ue.RetryAfter)
 	}
-	for i := 2; i <= auth.OTPMaxPerPhoneHour; i++ {
+	for i := 2; i <= auth.DefaultOTPMaxPerPhoneHour; i++ {
 		f.clock.Advance(auth.OTPResendGap + time.Second)
 		f.request(t, phone, fmt.Sprintf("1.1.1.%d", i))
 	}
@@ -104,9 +104,10 @@ func TestOTPResendGapAndPerPhoneLimit(t *testing.T) {
 	f.request(t, phone, "9.9.9.9")
 }
 
+// The default per-IP limit (200/hour) lets a campus NAT through; the next request from that IP is refused.
 func TestOTPPerIPLimit(t *testing.T) {
 	f := newFixture(t, auth.EchoSender{})
-	for i := 0; i < auth.OTPMaxPerIPHour; i++ {
+	for i := 0; i < auth.DefaultOTPMaxPerIPHour; i++ {
 		f.request(t, fmt.Sprintf("08123400%04d", i), "5.5.5.5")
 	}
 	_, err := f.svc.RequestOTP(ctx, "081299990000", auth.RequestMeta{IP: "5.5.5.5"})
@@ -559,8 +560,8 @@ func TestAdminGrantAndRequireAdmin(t *testing.T) {
 // inside its own IPv6 /64 could request codes for unlimited phone numbers (SMS/WhatsApp cost, "SMS
 // pumping"). IPv6 addresses are now counted per /64.
 func TestOTPPerIPLimitGroupsIPv6By64(t *testing.T) {
-	f := newFixture(t, auth.EchoSender{})
-	for i := 0; i < auth.OTPMaxPerIPHour; i++ {
+	f := newFixture(t, auth.EchoSender{}, func(c *auth.Config) { c.OTPMaxPerIPHour = 20 })
+	for i := 0; i < 20; i++ {
 		f.request(t, fmt.Sprintf("08123400%04d", i), fmt.Sprintf("2001:db8:7:7::%x", i+1))
 	}
 	_, err := f.svc.RequestOTP(ctx, "081299990000", auth.RequestMeta{IP: "2001:db8:7:7:abcd::99"})
@@ -619,5 +620,89 @@ func TestCSRFLoginFromForeignOriginRefused(t *testing.T) {
 	h.clock.Advance(auth.OTPResendGap)
 	if resp, _ := h.do(t, "POST", "/api/v1/auth/otp/request", `{"phone":"081244440002"}`, nil); resp.StatusCode != 200 {
 		t.Fatalf("request without Origin: %d", resp.StatusCode)
+	}
+}
+
+// OTP_MAX_PER_PHONE_HOUR / OTP_MAX_PER_IP_HOUR are honored when set.
+func TestOTPConfiguredLimits(t *testing.T) {
+	f := newFixture(t, auth.EchoSender{}, func(c *auth.Config) { c.OTPMaxPerPhoneHour, c.OTPMaxPerIPHour = 2, 3 })
+	f.request(t, "081211110000", "6.6.6.1")
+	f.clock.Advance(auth.OTPResendGap + time.Second)
+	f.request(t, "081211110000", "6.6.6.2")
+	f.clock.Advance(auth.OTPResendGap + time.Second)
+	_, err := f.svc.RequestOTP(ctx, "081211110000", auth.RequestMeta{IP: "6.6.6.3"})
+	if ue := wantStatus(t, err, http.StatusTooManyRequests); !strings.Contains(ue.Msg, "nomor ini") {
+		t.Fatalf("per phone: %q", ue.Msg)
+	}
+	for i := range 3 {
+		f.request(t, fmt.Sprintf("08121111%04d", i+1), "6.6.6.9")
+	}
+	_, err = f.svc.RequestOTP(ctx, "081211119999", auth.RequestMeta{IP: "6.6.6.9"})
+	if ue := wantStatus(t, err, http.StatusTooManyRequests); !strings.Contains(ue.Msg, "jaringanmu") {
+		t.Fatalf("per IP: %q", ue.Msg)
+	}
+}
+
+// OTP_MAX_SENDS_PER_DAY: once the service has sent the day's quota (WIB calendar day), every OTP request is
+// refused politely until 00:00 WIB, and the admins are alerted exactly once per day, across instances.
+func TestOTPDailyCap(t *testing.T) {
+	const limit = 3
+	f := newFixture(t, auth.EchoSender{}, func(c *auth.Config) { c.OTPMaxSendsPerDay = limit })
+	var alerts []string
+	f.svc.OnDailyCapReached = func(_ context.Context, day string, l int) error {
+		if l != limit {
+			t.Errorf("alert limit = %d", l)
+		}
+		alerts = append(alerts, day)
+		return nil
+	}
+	for i := range limit {
+		f.request(t, fmt.Sprintf("08125550%04d", i), fmt.Sprintf("8.8.%d.1", i)) // distinct phones and IPs
+	}
+	for i := range 3 {
+		_, err := f.svc.RequestOTP(ctx, fmt.Sprintf("08125559%04d", i), auth.RequestMeta{IP: fmt.Sprintf("9.8.%d.1", i)})
+		ue := wantStatus(t, err, http.StatusServiceUnavailable)
+		if ue.Code != "otp_daily_cap" || !strings.Contains(ue.Msg, "Coba lagi besok") || ue.RetryAfter <= 0 || ue.RetryAfter > 24*time.Hour {
+			t.Fatalf("refusal %d: %+v", i, ue)
+		}
+	}
+	// t0 is 16:00 WIB on 2026-11-16.
+	if len(alerts) != 1 || alerts[0] != "2026-11-16" {
+		t.Fatalf("alerts = %v, want one for 2026-11-16", alerts)
+	}
+
+	// A second instance on the same database refuses too and does not alert again.
+	other, err := auth.NewService(f.db, f.dir, auth.EchoSender{}, f.svc.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other.Now = f.clock.Now
+	other.OnDailyCapReached = func(context.Context, string, int) error { t.Error("second alert on the same day"); return nil }
+	_, err = other.RequestOTP(ctx, "081255580000", auth.RequestMeta{IP: "9.9.1.1"})
+	wantStatus(t, err, http.StatusServiceUnavailable)
+
+	// Midnight WIB (17:00 UTC) starts a new day.
+	f.clock.Set(time.Date(2026, 11, 16, 17, 0, 0, 0, time.UTC))
+	f.request(t, "081255570000", "9.9.2.1")
+}
+
+// A failed admin alert is retried by the next refused request instead of being lost for the day.
+func TestOTPDailyCapAlertRetried(t *testing.T) {
+	f := newFixture(t, auth.EchoSender{}, func(c *auth.Config) { c.OTPMaxSendsPerDay = 1 })
+	calls := 0
+	f.svc.OnDailyCapReached = func(context.Context, string, int) error {
+		calls++
+		if calls == 1 {
+			return errors.New("notify down")
+		}
+		return nil
+	}
+	f.request(t, "081266660000", "8.8.8.1")
+	for i := range 3 {
+		_, err := f.svc.RequestOTP(ctx, fmt.Sprintf("08126666%04d", i+1), auth.RequestMeta{IP: "8.8.8.2"})
+		wantStatus(t, err, http.StatusServiceUnavailable)
+	}
+	if calls != 2 {
+		t.Fatalf("alert calls = %d, want 2 (failed, then retried once)", calls)
 	}
 }
