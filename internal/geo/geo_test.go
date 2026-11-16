@@ -46,7 +46,7 @@ func TestFuzzPointDoesNotLeakPrecisePoint(t *testing.T) {
 		t.Fatal("no nearby point in the same cell produced the same output")
 	}
 
-	// Averaging the public points of many listings at one location lands near the cell centre, not on the
+	// Averaging the public points of many listings at one location lands near the cell center, not on the
 	// true point: the error stays at cell scale.
 	lat, lng = -7.771234, 110.378901
 	var sLat, sLng float64
@@ -64,7 +64,7 @@ func TestFuzzPointDoesNotLeakPrecisePoint(t *testing.T) {
 	toCentre := DistanceKm(avgLat, avgLng, cLat, cLng) * 1000
 	toTruth := DistanceKm(avgLat, avgLng, lat, lng) * 1000
 	if toCentre > 15 {
-		t.Fatalf("average is %.1f m from the cell centre", toCentre)
+		t.Fatalf("average is %.1f m from the cell center", toCentre)
 	}
 	if math.Abs(toTruth-DistanceKm(cLat, cLng, lat, lng)*1000) > 15 {
 		t.Fatalf("average converges towards the truth: %.1f m", toTruth)

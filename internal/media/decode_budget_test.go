@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// bombPNG builds a w×h PNG (colour type 6 = RGBA, bitDepth 8 or 16) whose pixels are all zero. Written
+// bombPNG builds a w×h PNG (color type 6 = RGBA, bitDepth 8 or 16) whose pixels are all zero. Written
 // row by row through zlib, so a 64-megapixel file is only a few hundred KB and needs no image in memory.
 func bombPNG(t testing.TB, w, h int, bitDepth byte) []byte {
 	t.Helper()

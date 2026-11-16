@@ -30,7 +30,7 @@ const (
 	MaxConcurrentDecodes = 1
 )
 
-// decodeSlots serialises full decodes; decodeHook lets tests observe them.
+// decodeSlots serializes full decodes; decodeHook lets tests observe them.
 var (
 	decodeSlots = make(chan struct{}, MaxConcurrentDecodes)
 	decodeHook  func() (done func())
