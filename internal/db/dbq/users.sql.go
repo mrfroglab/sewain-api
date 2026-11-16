@@ -429,6 +429,59 @@ func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 	return items, nil
 }
 
+const listUsersByIDs = `-- name: ListUsersByIDs :many
+SELECT id, ord, phone, phone_verified_at, name, nickname, email, role, account_type, area_id, campus, bio, status, strikes, verification_status, verification_method, verified_at, nik_masked, early_lender, student_verified, base_rating, base_rating_count, demo, joined_at, deleted_at, created_at, updated_at FROM users WHERE id = ANY($1::text[]) ORDER BY ord
+`
+
+// Public profiles a scoped snapshot refers to (SNAPSHOT_USERS=referenced).
+func (q *Queries) ListUsersByIDs(ctx context.Context, ids []string) ([]User, error) {
+	rows, err := q.db.Query(ctx, listUsersByIDs, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []User{}
+	for rows.Next() {
+		var i User
+		if err := rows.Scan(
+			&i.ID,
+			&i.Ord,
+			&i.Phone,
+			&i.PhoneVerifiedAt,
+			&i.Name,
+			&i.Nickname,
+			&i.Email,
+			&i.Role,
+			&i.AccountType,
+			&i.AreaID,
+			&i.Campus,
+			&i.Bio,
+			&i.Status,
+			&i.Strikes,
+			&i.VerificationStatus,
+			&i.VerificationMethod,
+			&i.VerifiedAt,
+			&i.NikMasked,
+			&i.EarlyLender,
+			&i.StudentVerified,
+			&i.BaseRating,
+			&i.BaseRatingCount,
+			&i.Demo,
+			&i.JoinedAt,
+			&i.DeletedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listVerifications = `-- name: ListVerifications :many
 SELECT id, ord, user_id, method, name_on_ktp, nik_masked, ktp_photo_id, selfie_photo_id, status, auto, submitted_at, reviewed_at, reviewed_by, reason, kyc_submission_id, created_at, updated_at FROM verification_requests ORDER BY ord DESC
 `

@@ -65,3 +65,16 @@ func TestRateInvalidRefused(t *testing.T) {
 		t.Fatalf("invalid OTP_MAX_PER_IP_HOUR: %v", err)
 	}
 }
+
+func TestSnapshotUsers(t *testing.T) {
+	c, err := LoadFrom(env())
+	if err != nil || c.SnapshotUsers != "all" {
+		t.Fatalf("default SNAPSHOT_USERS = %q, %v", c.SnapshotUsers, err)
+	}
+	if c, err := LoadFrom(env("SNAPSHOT_USERS", "referenced")); err != nil || c.SnapshotUsers != "referenced" {
+		t.Fatalf("SNAPSHOT_USERS=referenced: %q, %v", c.SnapshotUsers, err)
+	}
+	if _, err := LoadFrom(env("SNAPSHOT_USERS", "some")); err == nil || !strings.Contains(err.Error(), "SNAPSHOT_USERS") {
+		t.Fatalf("invalid SNAPSHOT_USERS accepted: %v", err)
+	}
+}

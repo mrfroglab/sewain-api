@@ -8,6 +8,10 @@ SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL FOR UPDATE;
 -- Deleted (anonymized) accounts stay listed: their bookings and reviews still point at them.
 SELECT * FROM users ORDER BY ord;
 
+-- name: ListUsersByIDs :many
+-- Public profiles a scoped snapshot refers to (SNAPSHOT_USERS=referenced).
+SELECT * FROM users WHERE id = ANY(@ids::text[]) ORDER BY ord;
+
 -- name: UserExists :one
 SELECT EXISTS (SELECT 1 FROM users WHERE id = $1);
 
