@@ -21,17 +21,6 @@ func (q *Queries) DeleteStore(ctx context.Context, userID string) error {
 	return err
 }
 
-const demoSessionUser = `-- name: DemoSessionUser :one
-SELECT user_id FROM demo_sessions WHERE token_hash = $1
-`
-
-func (q *Queries) DemoSessionUser(ctx context.Context, tokenHash string) (string, error) {
-	row := q.db.QueryRow(ctx, demoSessionUser, tokenHash)
-	var user_id string
-	err := row.Scan(&user_id)
-	return user_id, err
-}
-
 const findUserByPhone = `-- name: FindUserByPhone :one
 SELECT id, ord, phone, phone_verified_at, name, nickname, email, role, account_type, area_id, campus, bio, status, strikes, verification_status, verification_method, verified_at, nik_masked, early_lender, student_verified, base_rating, base_rating_count, demo, joined_at, deleted_at, created_at, updated_at FROM users WHERE phone = $1 AND deleted_at IS NULL
 `
@@ -251,20 +240,6 @@ func (q *Queries) GetVerificationForUpdate(ctx context.Context, id string) (Veri
 	return i, err
 }
 
-const insertDemoSession = `-- name: InsertDemoSession :exec
-INSERT INTO demo_sessions (token_hash, user_id) VALUES ($1, $2)
-`
-
-type InsertDemoSessionParams struct {
-	TokenHash string
-	UserID    string
-}
-
-func (q *Queries) InsertDemoSession(ctx context.Context, arg InsertDemoSessionParams) error {
-	_, err := q.db.Exec(ctx, insertDemoSession, arg.TokenHash, arg.UserID)
-	return err
-}
-
 const insertUser = `-- name: InsertUser :exec
 INSERT INTO users (id, phone, name, nickname, email, role, account_type, area_id, campus, bio, status, strikes,
   verification_status, verification_method, verified_at, nik_masked, early_lender, student_verified, base_rating,
@@ -402,9 +377,10 @@ func (q *Queries) ListStores(ctx context.Context) ([]Store, error) {
 }
 
 const listUsers = `-- name: ListUsers :many
-SELECT id, ord, phone, phone_verified_at, name, nickname, email, role, account_type, area_id, campus, bio, status, strikes, verification_status, verification_method, verified_at, nik_masked, early_lender, student_verified, base_rating, base_rating_count, demo, joined_at, deleted_at, created_at, updated_at FROM users WHERE deleted_at IS NULL ORDER BY ord
+SELECT id, ord, phone, phone_verified_at, name, nickname, email, role, account_type, area_id, campus, bio, status, strikes, verification_status, verification_method, verified_at, nik_masked, early_lender, student_verified, base_rating, base_rating_count, demo, joined_at, deleted_at, created_at, updated_at FROM users ORDER BY ord
 `
 
+// Deleted (anonymized) accounts stay listed: their bookings and reviews still point at them.
 func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := q.db.Query(ctx, listUsers)
 	if err != nil {

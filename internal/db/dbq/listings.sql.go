@@ -673,12 +673,13 @@ func (q *Queries) ListListings(ctx context.Context) ([]ListingRow, error) {
 
 const listListingsVisibleTo = `-- name: ListListingsVisibleTo :many
 SELECT id, ord, slug, owner_id, title, category, description, condition_notes, price_per_day, price_per_hour, price_per_week, duration_discount, min_days, max_days, item_value, lat, lng, area_id, radius_km, handover, meeting_point, handover_hours, late_fee_per_day, late_fee_cap_percent, cancellation, special_rules, approval, auto_approve_min_rating, stock, vehicle, status, rent_count, base_rating, base_rating_count, created_at, updated_at FROM listing_rows l
-WHERE l.status = 'aktif' OR l.owner_id = $1
+WHERE (l.status = 'aktif' AND EXISTS (SELECT 1 FROM users o WHERE o.id = l.owner_id AND o.status = 'aktif' AND o.deleted_at IS NULL))
+   OR l.owner_id = $1
    OR EXISTS (SELECT 1 FROM bookings b WHERE b.listing_id = l.id AND (b.renter_id = $1 OR b.provider_id = $1))
 ORDER BY ord DESC
 `
 
-// Active listings, the viewer's own listings (any status) and listings of the viewer's bookings.
+// Active listings of active owners, the viewer's own listings (any status) and listings of the viewer's bookings.
 func (q *Queries) ListListingsVisibleTo(ctx context.Context, viewer string) ([]ListingRow, error) {
 	rows, err := q.db.Query(ctx, listListingsVisibleTo, viewer)
 	if err != nil {

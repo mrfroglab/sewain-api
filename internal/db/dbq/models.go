@@ -66,6 +66,18 @@ type AuditLog struct {
 	Ip        *string
 }
 
+type AuthSession struct {
+	ID         string
+	TokenHash  []byte
+	UserID     string
+	CreatedAt  time.Time
+	LastSeenAt time.Time
+	ExpiresAt  time.Time
+	RevokedAt  *time.Time
+	UserAgent  string
+	Ip         string
+}
+
 type BannedKeyword struct {
 	Word      string
 	Position  int
@@ -173,10 +185,14 @@ type CommissionConfig struct {
 	CreatedAt          time.Time
 }
 
-type DemoSession struct {
-	TokenHash string
-	UserID    string
-	CreatedAt time.Time
+type Consent struct {
+	ID         int64
+	UserID     string
+	Doc        string
+	Version    string
+	AcceptedAt time.Time
+	Ip         string
+	UserAgent  string
 }
 
 type Dispute struct {
@@ -229,6 +245,37 @@ type IdempotencyKey struct {
 	Status      int
 	Response    string
 	CreatedAt   time.Time
+}
+
+type Identity struct {
+	UserID       string
+	NikHmac      []byte
+	NikEnc       []byte
+	NikMasked    string
+	SubmissionID *string
+	VerifiedAt   time.Time
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+type KycSubmission struct {
+	ID              string
+	UserID          string
+	NikHmac         []byte
+	NikEnc          []byte
+	NikMasked       string
+	NameEnc         []byte
+	KtpObject       *string
+	SelfieObject    *string
+	Provider        string
+	Status          string
+	Reason          string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	DecidedAt       *time.Time
+	DecidedBy       *string
+	FilesPurgeAfter *time.Time
+	FilesPurgedAt   *time.Time
 }
 
 type Listing struct {
@@ -328,6 +375,13 @@ type Message struct {
 	CreatedAt time.Time
 }
 
+type NikBlacklist struct {
+	NikHmac   []byte
+	Reason    string
+	CreatedBy string
+	CreatedAt time.Time
+}
+
 type Notification struct {
 	ID     string
 	Ord    int64
@@ -338,6 +392,56 @@ type Notification struct {
 	Href   *string
 	At     time.Time
 	ReadAt *time.Time
+}
+
+type NotificationOutbox struct {
+	ID             string
+	UserID         string
+	NotificationID string
+	Channel        string
+	Payload        json.RawMessage
+	Status         string
+	Attempts       int
+	NextAttemptAt  time.Time
+	LastError      *string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	SentAt         *time.Time
+}
+
+type NotificationPref struct {
+	UserID           string
+	WebpushBooking   bool
+	WebpushChat      bool
+	WebpushSengketa  bool
+	WebpushSistem    bool
+	EmailBooking     bool
+	EmailChat        bool
+	EmailSengketa    bool
+	EmailSistem      bool
+	WhatsappBooking  bool
+	WhatsappChat     bool
+	WhatsappSengketa bool
+	WhatsappSistem   bool
+	QuietEnabled     bool
+	QuietStart       pgtype.Time
+	QuietEnd         pgtype.Time
+	Timezone         string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
+type OtpChallenge struct {
+	ID         string
+	Phone      string
+	Purpose    string
+	CodeHash   []byte
+	Ip         string
+	Provider   string
+	Attempts   int
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	ConsumedAt *time.Time
 }
 
 type Photo struct {
@@ -358,6 +462,18 @@ type Photo struct {
 	Bytes      *int64
 	Mime       *string
 	CreatedAt  time.Time
+}
+
+type PushSubscription struct {
+	ID            string
+	UserID        string
+	Endpoint      string
+	P256dh        string
+	Auth          string
+	UserAgent     string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	LastSuccessAt *time.Time
 }
 
 type Report struct {

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"strconv"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -72,4 +74,35 @@ func MigrationStatus(ctx context.Context, pool *pgxpool.Pool, w io.Writer) error
 		fmt.Fprintf(w, "%05d  %-40s %s\n", s.Source.Version, s.Source.Path, applied)
 	}
 	return nil
+}
+
+// LatestMigration is the highest migration version embedded in this binary.
+func LatestMigration() int64 {
+	var latest int64
+	entries, _ := fs.ReadDir(Migrations, "migrations")
+	for _, e := range entries {
+		name := e.Name()
+		if i := strings.IndexByte(name, '_'); i > 0 {
+			if v, err := strconv.ParseInt(name[:i], 10, 64); err == nil && v > latest {
+				latest = v
+			}
+		}
+	}
+	return latest
+}
+
+// SchemaVersion is the applied schema version for readiness checks: LatestMigration when every embedded migration
+// is applied, 0 while any is pending (migrations run out of order, so the highest applied number alone is not
+// enough).
+func SchemaVersion(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
+	p, sqlDB, err := provider(pool)
+	if err != nil {
+		return 0, err
+	}
+	defer sqlDB.Close()
+	pending, err := p.HasPending(ctx)
+	if err != nil || pending {
+		return 0, err
+	}
+	return LatestMigration(), nil
 }

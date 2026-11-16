@@ -11,9 +11,10 @@ SELECT EXISTS (SELECT 1 FROM listings WHERE id = $1);
 SELECT * FROM listing_rows ORDER BY ord DESC;
 
 -- name: ListListingsVisibleTo :many
--- Active listings, the viewer's own listings (any status) and listings of the viewer's bookings.
+-- Active listings of active owners, the viewer's own listings (any status) and listings of the viewer's bookings.
 SELECT * FROM listing_rows l
-WHERE l.status = 'aktif' OR l.owner_id = @viewer
+WHERE (l.status = 'aktif' AND EXISTS (SELECT 1 FROM users o WHERE o.id = l.owner_id AND o.status = 'aktif' AND o.deleted_at IS NULL))
+   OR l.owner_id = @viewer
    OR EXISTS (SELECT 1 FROM bookings b WHERE b.listing_id = l.id AND (b.renter_id = @viewer OR b.provider_id = @viewer))
 ORDER BY ord DESC;
 
