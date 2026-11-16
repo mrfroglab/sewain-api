@@ -1,0 +1,113 @@
+package ratelimit
+
+import (
+	"fmt"
+	"log/slog"
+	"math"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/mrfroglab/sewain-api/internal/platform/middleware"
+)
+
+// KeyFunc derives the bucket key for a request. Returning "" skips limiting for that request.
+type KeyFunc func(r *http.Request) string
+
+// ByIP keys on the client IP resolved by middleware.RealIP (falling back to RemoteAddr).
+func ByIP(r *http.Request) string {
+	if ip := middleware.ClientIPFrom(r.Context()); ip != "" {
+		return "ip:" + ip
+	}
+	return "ip:" + r.RemoteAddr
+}
+
+// ByUser keys on the authenticated user (middleware.SetUserID) and falls back to the IP for guests, so
+// unauthenticated traffic on a user-keyed route is still limited.
+func ByUser(r *http.Request) string {
+	if uid := middleware.UserIDFrom(r.Context()); uid != "" {
+		return "user:" + uid
+	}
+	return ByIP(r)
+}
+
+// ByUserAndIP keys on the pair, e.g. to slow down one account being driven from many IPs separately.
+func ByUserAndIP(r *http.Request) string {
+	return ByUser(r) + "|" + ByIP(r)
+}
+
+// Profile is a named rate plus the key it applies to.
+type Profile struct {
+	Name string
+	Rate Rate
+	Key  KeyFunc
+}
+
+// Built-in profiles (F5.2). Burst is smaller than the per-minute limit so a client cannot spend a whole
+// minute's allowance in one second.
+var (
+	// Public: anonymous reads (snapshot, search, photos) per IP. A campus NAT can put many students behind
+	// one IP, hence the generous limit.
+	Public = Profile{Name: "public", Rate: Rate{Limit: 120, Per: time.Minute, Burst: 60}, Key: ByIP}
+	// Write: state-changing actions per user.
+	Write = Profile{Name: "write", Rate: Rate{Limit: 60, Per: time.Minute, Burst: 20}, Key: ByUser}
+	// Upload: photo and KYC uploads per user.
+	Upload = Profile{Name: "upload", Rate: Rate{Limit: 20, Per: time.Minute, Burst: 10}, Key: ByUser}
+	// Auth: OTP request/verify and login per IP.
+	Auth = Profile{Name: "auth", Rate: Rate{Limit: 10, Per: time.Minute, Burst: 5}, Key: ByIP}
+)
+
+// Profiles lists the built-in profiles.
+func Profiles() []Profile { return []Profile{Public, Write, Upload, Auth} }
+
+// Options tunes Middleware.
+type Options struct {
+	Log *slog.Logger
+	// OnLimited is called for every rejected request (e.g. to count it in metrics).
+	OnLimited func(profile string, r *http.Request)
+}
+
+// Middleware enforces p with l. Rejected requests get 429 with Retry-After (whole seconds, rounded up) and
+// {"ok":false,"error":"Terlalu banyak permintaan. Coba lagi dalam N detik."}. If the limiter itself fails
+// the request is let through (fail open) and the error is logged: a broken limiter must not take the API
+// down.
+func Middleware(l Limiter, p Profile, o Options) func(http.Handler) http.Handler {
+	key := p.Key
+	if key == nil {
+		key = ByIP
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			k := key(r)
+			if k == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			d, err := l.Allow(r.Context(), p.Name+"|"+k, p.Rate)
+			if err != nil {
+				if o.Log != nil {
+					o.Log.ErrorContext(r.Context(), "rate limiter failed", "profile", p.Name, "err", err)
+				}
+				next.ServeHTTP(w, r)
+				return
+			}
+			h := w.Header()
+			h.Set("X-RateLimit-Limit", strconv.Itoa(d.Limit))
+			h.Set("X-RateLimit-Remaining", strconv.Itoa(d.Remaining))
+			if !d.Allowed {
+				secs := int(math.Ceil(d.RetryAfter.Seconds()))
+				if secs < 1 {
+					secs = 1
+				}
+				h.Set("Retry-After", strconv.Itoa(secs))
+				if o.OnLimited != nil {
+					o.OnLimited(p.Name, r)
+				}
+				middleware.WriteError(w, http.StatusTooManyRequests,
+					fmt.Sprintf("Terlalu banyak permintaan. Coba lagi dalam %d detik.", secs))
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
