@@ -38,7 +38,8 @@ type Options struct {
 	Storage, RetentionStorage media.Storage
 	// Now is the real clock (the demo clock adds its offset).
 	Now func() time.Time
-	// RateProfiles replaces the default per-route rate limits.
+	// RateProfiles replaces the per-route rate limits from the configuration (Config.Rates); unset profiles keep
+	// the configured rate.
 	RateProfiles httpapi.RateProfiles
 	// PushHosts overrides the allowed push services (tests: "*").
 	PushHosts []string
@@ -132,6 +133,12 @@ func New(cfg config.Config, pool *pgxpool.Pool, log *slog.Logger, opt Options) (
 		return nil, err
 	}
 	a.Auth.Now, a.KYC.Now = now, now
+	a.Auth.Log = log
+	a.Auth.OnDailyCapReached = func(ctx context.Context, day string, limit int) error {
+		return a.Svc.NotifyAdmins(ctx, "keamanan", "Batas harian OTP tercapai",
+			fmt.Sprintf("Sudah %d kode OTP terkirim hari ini (%s). Permintaan kode baru ditolak sampai 00.00 WIB. "+
+				"Cek kemungkinan SMS pumping, atau naikkan OTP_MAX_SENDS_PER_DAY kalau lalu lintasnya wajar.", limit, day), "")
+	}
 	a.KYC.Hooks = kyc.Hooks{
 		OnSubmitted: func(ctx context.Context, tx pgx.Tx, s kyc.Submission) error {
 			return asAuthError(a.Svc.KYCSubmitted(ctx, tx, kycEvent(s)))
@@ -200,12 +207,26 @@ func New(cfg config.Config, pool *pgxpool.Pool, log *slog.Logger, opt Options) (
 	}
 	srv := httpapi.New(cfg, a.Svc, log, httpapi.Deps{
 		Auth: a.Auth, KYC: a.KYC, Storage: a.Storage, Signer: a.Signer, Hub: a.Hub, Notify: notifyAPI, Limiter: a.Limiter,
-		Metrics: a.Metrics, Profiles: opt.RateProfiles, IPResolver: ipRes,
+		Metrics: a.Metrics, Profiles: rateProfiles(cfg, opt.RateProfiles), IPResolver: ipRes,
 		Ready: health.Readiness{Ping: pool.Ping, MigrationVersion: func(ctx context.Context) (int64, error) { return db.SchemaVersion(ctx, pool) },
 			MinMigration: db.LatestMigration()},
 	})
 	a.handler = srv.Routes()
 	return a, nil
+}
+
+// rateProfiles fills the profiles not overridden by the caller from the configured rates.
+func rateProfiles(cfg config.Config, override httpapi.RateProfiles) httpapi.RateProfiles {
+	p := httpapi.ProfilesFromRates(cfg.Rates)
+	for _, o := range []struct{ dst, src *ratelimit.Profile }{
+		{&p.Public, &override.Public}, {&p.Write, &override.Write}, {&p.Upload, &override.Upload},
+		{&p.Auth, &override.Auth}, {&p.Demo, &override.Demo},
+	} {
+		if o.src.Name != "" {
+			*o.dst = *o.src
+		}
+	}
+	return p
 }
 
 // Handler is the whole HTTP API.

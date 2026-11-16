@@ -45,7 +45,19 @@ type Deps struct {
 
 // RateProfiles are the per-route rate limits (docs/integration/ops.md §2). Zero values use the ratelimit defaults.
 type RateProfiles struct {
-	Public, Write, Upload, Auth ratelimit.Profile
+	Public, Write, Upload, Auth, Demo ratelimit.Profile
+}
+
+// ProfilesFromRates builds the built-in profiles (names and keys) with the configured rates (RATE_* env).
+func ProfilesFromRates(r ratelimit.Rates) RateProfiles {
+	r = r.WithDefaults()
+	return RateProfiles{
+		Public: ratelimit.Public.With(r.Public),
+		Write:  ratelimit.Write.With(r.Write),
+		Upload: ratelimit.Upload.With(r.Upload),
+		Auth:   ratelimit.Auth.With(r.Auth),
+		Demo:   ratelimit.Demo.With(r.Demo),
+	}
 }
 
 func (p RateProfiles) withDefaults() RateProfiles {
@@ -60,6 +72,9 @@ func (p RateProfiles) withDefaults() RateProfiles {
 	}
 	if p.Auth.Name == "" {
 		p.Auth = ratelimit.Auth
+	}
+	if p.Demo.Name == "" {
+		p.Demo = ratelimit.Demo
 	}
 	return p
 }
@@ -91,7 +106,7 @@ func (s *Server) Routes() http.Handler {
 			}
 		}})
 	}
-	write, upload, authRL := rl(d.Profiles.Write), rl(d.Profiles.Upload), rl(d.Profiles.Auth)
+	write, upload, authRL, demoRL := rl(d.Profiles.Write), rl(d.Profiles.Upload), rl(d.Profiles.Auth), rl(d.Profiles.Demo)
 	user, admin := auth.RequireUser, auth.RequireAdmin
 	fn := func(f http.HandlerFunc) http.Handler { return f }
 
@@ -107,7 +122,7 @@ func (s *Server) Routes() http.Handler {
 	ah := auth.Handlers{S: d.Auth}
 	mux.Handle("POST /api/v1/auth/otp/request", authRL(fn(ah.OTPRequest)))
 	mux.Handle("POST /api/v1/auth/otp/verify", authRL(fn(ah.OTPVerify)))
-	mux.Handle("POST /api/v1/auth/demo-login", authRL(fn(s.demoLogin)))
+	mux.Handle("POST /api/v1/auth/demo-login", demoRL(fn(s.demoLogin)))
 	mux.Handle("POST /api/v1/auth/logout", write(fn(ah.Logout)))
 	mux.HandleFunc("GET /api/v1/auth/me", s.me)
 	mux.Handle("GET /api/v1/auth/sessions", user(fn(ah.ListSessions)))
@@ -171,7 +186,6 @@ func (s *Server) Routes() http.Handler {
 		middleware.Recover(s.log),
 		middleware.SecurityHeaders,
 		middleware.CORS(cors),
-		rl(d.Profiles.Public),
 		middleware.BodyLimit(middleware.DefaultBodyLimit,
 			middleware.BodyRule{Method: http.MethodPost, Path: "/api/v1/photos", Limit: middleware.UploadBodyLimit},
 			middleware.BodyRule{Method: http.MethodPost, Path: "/api/v1/kyc/submissions", Limit: 2*kyc.MaxFileBytes + 1<<20},
@@ -181,6 +195,9 @@ func (s *Server) Routes() http.Handler {
 		clientAddr,
 		s.wsQueryToken,
 		d.Auth.Middleware, // also records the user for logs and per-user rate limits (middleware.SetUserID)
+		// The coarse limit on every route runs after the viewer is resolved so signed-in students behind one campus
+		// NAT each get their own bucket; guests (and invalid tokens) share the bucket of their IP.
+		rl(d.Profiles.Public),
 	)
 }
 

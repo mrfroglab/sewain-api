@@ -42,6 +42,24 @@ func TestProductionRefusesDemoConfig(t *testing.T) {
 	}
 }
 
+// TestInvalidLimitsRefuseToStart: a malformed rate or OTP limit stops the process before it serves anything.
+func TestInvalidLimitsRefuseToStart(t *testing.T) {
+	for k, v := range map[string]string{
+		"APP_ENV": "development", "DATABASE_URL": "postgres://nobody@127.0.0.1:1/none",
+		"RATE_PUBLIC_PER_MIN": "1200/menit", "OTP_MAX_SENDS_PER_DAY": "-5",
+	} {
+		t.Setenv(k, v)
+	}
+	err := cli(nil, io.Discard, discard())
+	if err == nil || !strings.Contains(err.Error(), "RATE_PUBLIC_PER_MIN") {
+		t.Fatalf("invalid RATE_PUBLIC_PER_MIN: %v", err)
+	}
+	t.Setenv("RATE_PUBLIC_PER_MIN", "")
+	if err := cli(nil, io.Discard, discard()); err == nil || !strings.Contains(err.Error(), "OTP_MAX_SENDS_PER_DAY") {
+		t.Fatalf("invalid OTP_MAX_SENDS_PER_DAY: %v", err)
+	}
+}
+
 func secret() string {
 	b := make([]byte, 32)
 	_, _ = rand.Read(b)
