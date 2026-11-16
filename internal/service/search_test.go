@@ -4,6 +4,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/mrfroglab/sewain-api/internal/domain"
 	"github.com/mrfroglab/sewain-api/internal/geo"
 	"github.com/mrfroglab/sewain-api/internal/service"
 )
@@ -31,8 +32,8 @@ func TestSearch(t *testing.T) {
 			t.Fatal("hits must be ordered by distance")
 		}
 	}
-	// Two-way rule from Pogung, checked against independently computed distances (away from the edges, where the
-	// spheroid and haversine distances may disagree by a few meters). Same result as v1: scripts/compare-v1.sh.
+	// Two-way rule from Pogung, checked against independently computed distances from the PUBLIC point of each
+	// listing (review C1: the search never measures from the precise location).
 	plat, plng := -7.7596, 110.3727
 	pogung, _ := e.svc.Search(e.ctx, service.SearchParams{Lat: plat, Lng: plng, RadiusKm: 3})
 	hits, hidden := hitIDs(pogung), 0
@@ -40,10 +41,10 @@ func TestSearch(t *testing.T) {
 		if l.Status != "aktif" {
 			continue
 		}
-		d := geo.DistanceKm(plat, plng, l.Location.Lat, l.Location.Lng) * 1000
+		flat, flng := geo.FuzzPoint(l.ID, l.Location.Lat, l.Location.Lng)
+		d := geo.DistanceKm(plat, plng, flat, flng) * 1000
 		reach := math.Min(3000, l.RadiusKm*1000)
 		switch {
-		case math.Abs(d-reach) < 30 || math.Abs(d-3000) < 30:
 		case d <= reach && !hits[l.ID]:
 			t.Errorf("%s (%.0f m, reach %.0f m) must be visible", l.ID, d, reach)
 		case d > reach && hits[l.ID]:
@@ -100,5 +101,76 @@ func TestSearch(t *testing.T) {
 	r, _ := e.svc.Search(e.ctx, service.SearchParams{Lat: -7.7713, Lng: 110.3776, RadiusKm: 5, StartDate: e.today(10), EndDate: e.today(12)})
 	if !hitIDs(r)["l-tenda-dome-4p"] {
 		t.Fatal("stock left: listing stays available")
+	}
+}
+
+func TestSearchRadiusSnapsToOptions(t *testing.T) {
+	cases := map[float64]float64{0.2: 1, 1: 1, 1.01: 3, 2.5: 3, 4: 5, 7: 10, 12: 25, 40: 25}
+	for in, want := range cases {
+		if got := service.SnapRadiusKm(in); got != want {
+			t.Errorf("SnapRadiusKm(%v) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// TestSearchCannotTrilateratePreciseLocation plays the attack from review C1: binary-search the edge of the 1 km
+// search circle along three rays, then take the circumcentre of the three edge points. Before the fix this recovered
+// the precise location; now it recovers the public (fuzzed) point, which is > 150 m away from the precise one.
+func TestSearchCannotTrilateratePreciseLocation(t *testing.T) {
+	e := newEnv(t)
+	var target *domain.Listing
+	var pubLat, pubLng float64
+	for _, l := range e.state().Listings {
+		if l.Status != "aktif" || l.RadiusKm < 2 {
+			continue
+		}
+		la, ln := geo.FuzzPoint(l.ID, l.Location.Lat, l.Location.Lng)
+		if geo.DistanceKm(la, ln, l.Location.Lat, l.Location.Lng) > 0.2 {
+			target, pubLat, pubLng = l, la, ln
+			break
+		}
+	}
+	if target == nil {
+		t.Fatal("no seed listing with a public point > 200 m from its precise point")
+	}
+	// Local plane (metres) around the public point.
+	const m = 111_320.0
+	cos := math.Cos(pubLat * math.Pi / 180)
+	toLatLng := func(x, y float64) (float64, float64) { return pubLat + y/m, pubLng + x/(m*cos) }
+	toXY := func(lat, lng float64) (float64, float64) { return (lng - pubLng) * m * cos, (lat - pubLat) * m }
+	member := func(x, y float64) bool {
+		lat, lng := toLatLng(x, y)
+		r, err := e.svc.Search(e.ctx, service.SearchParams{Lat: lat, Lng: lng, RadiusKm: 1, Category: target.Category})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return hitIDs(r)[target.ID]
+	}
+	var pts [3][2]float64
+	for i := range pts {
+		ux, uy := math.Cos(float64(i)*2*math.Pi/3), math.Sin(float64(i)*2*math.Pi/3)
+		lo, hi := 0.0, 2000.0 // inside at the public point, outside 2 km away
+		for hi-lo > 1 {
+			mid := (lo + hi) / 2
+			if member(ux*mid, uy*mid) {
+				lo = mid
+			} else {
+				hi = mid
+			}
+		}
+		pts[i] = [2]float64{ux * lo, uy * lo}
+	}
+	// Circumcentre of the three edge points = the centre the search measures from.
+	ax, ay, bx, by, cx, cy := pts[0][0], pts[0][1], pts[1][0], pts[1][1], pts[2][0], pts[2][1]
+	d := 2 * (ax*(by-cy) + bx*(cy-ay) + cx*(ay-by))
+	ex := ((ax*ax+ay*ay)*(by-cy) + (bx*bx+by*by)*(cy-ay) + (cx*cx+cy*cy)*(ay-by)) / d
+	ey := ((ax*ax+ay*ay)*(cx-bx) + (bx*bx+by*by)*(ax-cx) + (cx*cx+cy*cy)*(bx-ax)) / d
+	rx, ry := toXY(target.Location.Lat, target.Location.Lng)
+	toReal, toPublic := math.Hypot(ex-rx, ey-ry), math.Hypot(ex, ey)
+	if toPublic > 30 {
+		t.Fatalf("estimate should land on the public point: %.0f m away", toPublic)
+	}
+	if toReal <= 150 {
+		t.Fatalf("precise location recovered within %.0f m", toReal)
 	}
 }

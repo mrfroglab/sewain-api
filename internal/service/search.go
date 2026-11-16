@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -32,6 +33,7 @@ type SearchHit struct {
 type SearchResult struct {
 	Hits                  []SearchHit `json:"hits"`
 	HiddenByProviderReach int         `json:"hiddenByProviderReach"`
+	RadiusKm              float64     `json:"radiusKm"` // the radius actually used (SnapRadiusKm)
 	Query                 string      `json:"query"`
 }
 
@@ -61,10 +63,31 @@ func TSQuery(q string) string {
 	return strings.Join(terms, " & ")
 }
 
-// Search implements the two-way radius rule with PostGIS (FR-S3) plus filters (FR-S4). Distances are rounded to
-// 100 m so they cannot be used to triangulate a provider's precise location (FR-S6).
+// SearchRadiiKm are the only search radii (review C1): free-form radii would let a caller binary-search a listing's
+// distance. Other values round up to the next option (above the largest: the largest).
+var SearchRadiiKm = []float64{1, 3, 5, 10, 25}
+
+// SnapRadiusKm rounds a requested radius up to the next allowed option.
+func SnapRadiusKm(r float64) float64 {
+	for _, o := range SearchRadiiKm {
+		if r <= o {
+			return o
+		}
+	}
+	return SearchRadiiKm[len(SearchRadiiKm)-1]
+}
+
+// fuzzMarginM is larger than the largest distance between a precise and a public point (geo: ≤ 400 m), so the SQL
+// prefilter on the precise location never drops a listing whose public point is inside the radius.
+const fuzzMarginM = 500
+
+// Search implements the two-way radius rule (FR-S3) plus filters (FR-S4). Everything visible to the caller is computed
+// from the public point of each listing (geo.FuzzPoint, the one the snapshot shows): membership in the radius, the
+// provider-reach check and distanceKm (rounded with geo.RoundDistanceKm). The radius is snapped to SearchRadiiKm.
+// Together this means repeated searches reveal nothing beyond the public point (FR-S6, review C1).
 func (s *Service) Search(ctx context.Context, p SearchParams) (SearchResult, error) {
-	arg := dbq.SearchListingsParams{Lat: p.Lat, Lng: p.Lng, RadiusM: p.RadiusKm * 1000, Category: optStr(p.Category), MinPrice: optInt(p.MinPrice),
+	radiusKm := SnapRadiusKm(p.RadiusKm)
+	arg := dbq.SearchListingsParams{Lat: p.Lat, Lng: p.Lng, RadiusM: radiusKm*1000 + fuzzMarginM, Category: optStr(p.Category), MinPrice: optInt(p.MinPrice),
 		MaxPrice: optInt(p.MaxPrice), Handover: optStr(p.Handover), ProviderType: optStr(p.ProviderType), Tsquery: optStr(TSQuery(p.Q))}
 	switch p.Collateral {
 	case "":
@@ -84,13 +107,37 @@ func (s *Service) Search(ctx context.Context, p SearchParams) (SearchResult, err
 	if err != nil {
 		return SearchResult{}, err
 	}
-	res := SearchResult{Hits: []SearchHit{}, Query: "ST_DWithin(location, point, LEAST(radius_penyewa, radius_penyedia))"}
+	type hit struct {
+		id   string
+		km   float64
+		rank float64
+	}
+	var hits []hit
+	res := SearchResult{Hits: []SearchHit{}, RadiusKm: radiusKm,
+		Query: "jarak(titik publik, titik cari) ≤ LEAST(radius_penyewa, radius_penyedia)"}
 	for _, r := range rows {
-		if r.Visible {
-			res.Hits = append(res.Hits, SearchHit{ID: r.ID, DistanceKm: geo.RoundDistanceKm(r.DistanceKm)})
-		} else {
-			res.HiddenByProviderReach++
+		lat, lng := geo.FuzzPoint(r.ID, r.Lat, r.Lng)
+		km := geo.DistanceKm(p.Lat, p.Lng, lat, lng)
+		if km > radiusKm {
+			continue
 		}
+		if km > r.RadiusKm {
+			res.HiddenByProviderReach++
+			continue
+		}
+		hits = append(hits, hit{r.ID, km, r.Rank})
+	}
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].km != hits[j].km {
+			return hits[i].km < hits[j].km
+		}
+		if hits[i].rank != hits[j].rank {
+			return hits[i].rank > hits[j].rank
+		}
+		return hits[i].id < hits[j].id
+	})
+	for _, h := range hits {
+		res.Hits = append(res.Hits, SearchHit{ID: h.id, DistanceKm: geo.RoundDistanceKm(h.km)})
 	}
 	return res, nil
 }

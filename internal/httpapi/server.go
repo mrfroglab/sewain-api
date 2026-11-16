@@ -180,8 +180,7 @@ func (s *Server) Routes() http.Handler {
 		middleware.Timeout(s.cfg.RequestTimeout, middleware.TimeoutOptions{}),
 		clientAddr,
 		s.wsQueryToken,
-		d.Auth.Middleware,
-		logUser,
+		d.Auth.Middleware, // also records the user for logs and per-user rate limits (middleware.SetUserID)
 	)
 }
 
@@ -212,16 +211,6 @@ func (s *Server) wsQueryToken(next http.Handler) http.Handler {
 				r = r.Clone(r.Context())
 				r.Header.Set("Authorization", "Bearer "+tok)
 			}
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// logUser puts the signed-in user on the access log and the per-user rate limit key.
-func logUser(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if v := auth.ViewerFrom(r.Context()); !v.IsGuest() {
-			middleware.SetUserID(r.Context(), v.UserID)
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -497,5 +486,5 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "Pencarian gagal.")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "hits": res.Hits, "hiddenByProviderReach": res.HiddenByProviderReach, "query": res.Query})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "hits": res.Hits, "hiddenByProviderReach": res.HiddenByProviderReach, "radiusKm": res.RadiusKm, "query": res.Query})
 }
