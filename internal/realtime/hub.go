@@ -138,7 +138,7 @@ func (h *Hub) Publish(e Event) {
 	}
 	for c := range h.clients {
 		_, mine := users[c.userID]
-		if !e.Public && !(e.Admins && c.admin) && !(c.userID != "" && mine) {
+		if !e.Public && (!e.Admins || !c.admin) && (c.userID == "" || !mine) {
 			continue
 		}
 		select {
@@ -221,7 +221,8 @@ func (h *Hub) register(userID, role string) (*client, context.Context, int) {
 		}
 		h.perUser[userID]++
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	// cancel is owned by the client and called by client.stop (unregister, Close, slow-client drop).
+	ctx, cancel := context.WithCancel(context.Background()) // #nosec G118 -- stored in client.cancel, see stop
 	c := &client{userID: userID, admin: role == RoleAdmin, send: make(chan []byte, h.opt.SendBuffer), cancel: cancel}
 	h.clients[c] = struct{}{}
 	return c, ctx, 0
@@ -289,7 +290,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 	conn.SetReadLimit(1024) // clients never need to send anything meaningful
 
 	// Read loop: required for pong/close handling. Any client message is ignored; a read error ends the session.

@@ -420,7 +420,7 @@ func (s *Service) ReadFile(ctx context.Context, v auth.Viewer, id, kind string) 
 	target := "kyc_submission:" + truncate(id, 64) + "/" + truncate(kind, 16)
 	if err := s.Auditor.Audit(ctx, v.UserID, "kyc.file.read", target, nil, nil); err != nil {
 		// %q: id and kind come URL-decoded from the path and must not be able to forge log lines.
-		log.Printf("kyc: audit file read %q by %q: %v", target, v.UserID, err)
+		log.Printf("kyc: audit file read %q by %q: %v", target, v.UserID, err) // #nosec G706 -- %q escapes line breaks
 		return nil, "", errAuditFailed
 	}
 	if kind != FileKTP && kind != FileSelfie {
