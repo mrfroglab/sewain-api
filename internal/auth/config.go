@@ -91,8 +91,11 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		ClientIPHeader: get("CLIENT_IP_HEADER", ""),
 	}
 	defProvider := ""
-	if c.DemoMode {
+	switch {
+	case c.DemoMode:
 		defProvider = ProviderDemo
+	case c.AppEnv == "development":
+		defProvider = ProviderEcho
 	}
 	c.OTPProvider = get("OTP_PROVIDER", defProvider)
 	c.CookieSecure = get("SESSION_COOKIE_SECURE", fmt.Sprint(c.AppEnv != "development" && c.AppEnv != "demo")) == "true"
