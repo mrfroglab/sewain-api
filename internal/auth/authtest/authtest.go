@@ -125,7 +125,7 @@ func migrationsFS() (fs.FS, error) {
 		if err != nil || n < MigrationFirst || n > MigrationLast {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(dir, name))
+		b, err := os.ReadFile(filepath.Join(dir, name)) // #nosec G304 -- test fixture: names listed from the repo's migrations dir
 		if err != nil {
 			return nil, err
 		}

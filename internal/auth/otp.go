@@ -50,7 +50,7 @@ func (s *Service) RequestOTP(ctx context.Context, rawPhone string, meta RequestM
 	if err != nil {
 		return RequestResult{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	// Lock order is always phone, then IP, so concurrent requests cannot deadlock.
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('otp:phone:' || $1, 0))`, phone); err != nil {
 		return RequestResult{}, err
@@ -171,7 +171,7 @@ func (s *Service) VerifyOTP(ctx context.Context, in VerifyInput, meta RequestMet
 	if err != nil {
 		return VerifyResult{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var id string
 	var hash []byte

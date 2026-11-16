@@ -39,7 +39,7 @@ func (s *Service) AcceptCurrentDocs(ctx context.Context, userID string, meta Req
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	if err := s.recordConsents(ctx, tx, userID, s.now(), meta); err != nil {
 		return err
 	}

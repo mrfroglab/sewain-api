@@ -49,15 +49,15 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 		var v Viewer
 		if token != "" {
 			viewer, touched, err := s.Resolve(r.Context(), token)
-			switch {
-			case err == nil:
+			switch err {
+			case nil:
 				v = viewer
 				// Per-user rate limits and access logs read the user from the platform request info.
 				middleware.SetUserID(r.Context(), v.UserID)
 				if touched && fromCookie {
 					s.SetSessionCookie(w, token)
 				}
-			case err == ErrNoSession:
+			case ErrNoSession:
 				if fromCookie {
 					s.ClearSessionCookie(w)
 				}
@@ -118,6 +118,8 @@ func (s *Service) OriginAllowed(r *http.Request) bool {
 
 // SetSessionCookie writes the session cookie (HttpOnly, SameSite=Lax, Path=/, Secure unless disabled).
 func (s *Service) SetSessionCookie(w http.ResponseWriter, token string) {
+	// #nosec G124 -- HttpOnly and SameSite are fixed; Secure is false only when SESSION_COOKIE_SECURE says so
+	// (plain-http development/demo), and ConfigFromEnv defaults it to true outside those environments.
 	http.SetCookie(w, &http.Cookie{
 		Name: SessionCookieName, Value: token, Path: "/", MaxAge: int(SessionTTL.Seconds()),
 		HttpOnly: true, Secure: s.Config.CookieSecure, SameSite: http.SameSiteLaxMode,
@@ -126,6 +128,7 @@ func (s *Service) SetSessionCookie(w http.ResponseWriter, token string) {
 
 // ClearSessionCookie deletes the session cookie.
 func (s *Service) ClearSessionCookie(w http.ResponseWriter) {
+	// #nosec G124 -- deletion cookie; same attributes as SetSessionCookie.
 	http.SetCookie(w, &http.Cookie{
 		Name: SessionCookieName, Value: "", Path: "/", MaxAge: -1,
 		HttpOnly: true, Secure: s.Config.CookieSecure, SameSite: http.SameSiteLaxMode,

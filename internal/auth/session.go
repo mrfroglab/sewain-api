@@ -44,7 +44,7 @@ func (s *Service) CreateSession(ctx context.Context, userID string, meta Request
 	if err != nil {
 		return "", Session{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	tok, sess, err := s.createSession(ctx, tx, userID, s.now(), meta)
 	if err != nil {
 		return "", Session{}, err
