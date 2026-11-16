@@ -30,9 +30,130 @@ jobs:
       - run: go test ./...
       - run: CGO_ENABLED=0 go build -o /dev/null ./cmd/api
 
+  lint:
+    name: Lint (golangci-lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0 # keep in sync with docs/integration/ops.md
+
+  security:
+    name: Security (govulncheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  workflow-lint:
+    name: Lint workflows (actionlint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
+
+  integration:
+    name: Integration tests (Postgres + PostGIS)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4-alpine
+        env:
+          POSTGRES_USER: sewain
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: sewain
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U sewain -d sewain"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      TEST_DATABASE_URL: postgres://sewain:test@127.0.0.1:5432/sewain?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -count=1 ./...
+
+  sqlc-diff:
+    name: sqlc generate is up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          if [ -f sqlc.yaml ] || [ -f sqlc.yml ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::sqlc.yaml not found, skipping"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.check.outputs.enabled == 'true'
+        name: sqlc diff + generate
+        run: |
+          sqlc() { docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/src" -w /src sqlc/sqlc:1.31.1 "$@"; }
+          sqlc vet
+          sqlc diff
+          sqlc generate
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --porcelain
+            git diff
+            echo "::error::sqlc generate changed files; run it locally and commit the result"
+            exit 1
+          fi
+
+  migrations:
+    name: Migrations up from an empty database
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4-alpine
+        env:
+          POSTGRES_USER: sewain
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: sewain
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U sewain -d sewain"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      DATABASE_URL: postgres://sewain:test@127.0.0.1:5432/sewain?sslmode=disable
+      APP_ENV: development
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          if [ ! -d internal/db/migrations ]; then
+            echo "::notice::internal/db/migrations not found, skipping"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          elif ! grep -rqs '"migrate"' cmd/api; then
+            # Without the subcommand the binary would just start the server and never exit.
+            echo "::notice::cmd/api has no migrate subcommand yet, skipping"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.check.outputs.enabled == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - if: steps.check.outputs.enabled == 'true'
+        name: api migrate up (twice, must be idempotent)
+        run: |
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/api" ./cmd/api
+          timeout 120 "$RUNNER_TEMP/api" migrate up
+          timeout 120 "$RUNNER_TEMP/api" migrate up
+
   image:
     name: Build & push image
-    needs: test
+    needs: [test, lint, integration]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -57,6 +178,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
