@@ -140,6 +140,14 @@ Contoh lengkap: [`deploy/.env.example`](deploy/.env.example). Kolom "Prod" = waj
 | `WEB_ORIGIN` | – | `http://sewain-web:3000` | Sumber foto contoh `/img/*` |
 | `OTP_PROVIDER` | ya | `zenziva` | `demo` (hanya DEMO_MODE) \| `echo` (staging) \| `zenziva`. demo/echo ditolak di produksi |
 | `OTP_PEPPER` | ya (+staging) | `openssl rand -base64 32` | Rahasia HMAC kode OTP |
+| `OTP_MAX_PER_PHONE_HOUR` | – | `5` | Kode OTP per nomor per jam |
+| `OTP_MAX_PER_IP_HOUR` | – | `200` | Kode OTP per IP (IPv6 per /64) per jam. Tinggi karena NAT kampus |
+| `OTP_MAX_SENDS_PER_DAY` | – | `2000` | Plafon global kode terkirim per hari WIB (anti SMS/WA pumping). Tercapai → OTP ditolak sampai 00.00 WIB, log `WARN`, satu notifikasi ke admin |
+| `RATE_PUBLIC_PER_MIN`, `RATE_PUBLIC_BURST` | – | `1200`, `300` | Batas global semua rute, per user (tamu per IP) |
+| `RATE_WRITE_PER_MIN`, `RATE_WRITE_BURST` | – | `120`, `40` | Aksi dan mutasi lain, per user (tamu per IP) |
+| `RATE_UPLOAD_PER_MIN`, `RATE_UPLOAD_BURST` | – | `30`, `10` | Unggah foto/KYC, per user |
+| `RATE_AUTH_PER_MIN`, `RATE_AUTH_BURST` | – | `60`, `20` | OTP request/verify, per IP |
+| `RATE_DEMO_PER_MIN`, `RATE_DEMO_BURST` | – | `600`, `100` | `demo-login` (DEMO_MODE), per IP |
 | `SESSION_COOKIE_SECURE` | – | `true` | Default `true` di luar development/demo |
 | `SESSION_BEARER_LOGIN` | – | `false` | Token di body + `?token=` WS (demo per tab). Ditolak di produksi |
 | `TERMS_VERSION`, `PRIVACY_VERSION` | ya | `2026-12-v1` | Versi S&K/privasi yang dicatat di `consents` |
@@ -160,6 +168,11 @@ Contoh lengkap: [`deploy/.env.example`](deploy/.env.example). Kolom "Prod" = waj
 | `NOTIFY_PREFS_PATH` | – | `/profil/notifikasi` | Tautan preferensi di email |
 
 `CLIENT_IP_HEADER` tidak dipakai lagi: IP klien selalu dari `TRUSTED_PROXY_CIDRS`.
+
+Batas `RATE_*` dan `OTP_MAX_*`: kosong atau `0` = default; nilai lain yang bukan bilangan bulat positif membuat API
+gagal start. Default dipilih untuk **NAT kampus** (ratusan mahasiswa di balik satu IP Wi-Fi UGM): batas global
+dihitung per user yang sudah masuk, bukan per IP. `RATE_*` dihitung di memori **per instance** (N instance = N kali
+lipat); `OTP_MAX_*` dihitung di database. Alasan lengkap: [`docs/integration/ops.md`](docs/integration/ops.md) §2.
 
 ### Kunci
 

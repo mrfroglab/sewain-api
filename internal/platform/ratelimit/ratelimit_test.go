@@ -138,12 +138,12 @@ func TestMiddleware429(t *testing.T) {
 	if rr.Code != http.StatusTooManyRequests {
 		t.Fatalf("status %d", rr.Code)
 	}
-	if got := rr.Header().Get("Retry-After"); got != "6" { // 10/min → one token every 6 s
+	if got := rr.Header().Get("Retry-After"); got != "1" { // 60/min → one token every second
 		t.Errorf("Retry-After %q", got)
 	}
 	var body map[string]any
 	_ = json.NewDecoder(rr.Body).Decode(&body)
-	if body["ok"] != false || body["error"] != "Terlalu banyak permintaan. Coba lagi dalam 6 detik." {
+	if body["ok"] != false || body["error"] != "Terlalu banyak permintaan. Coba lagi dalam 1 detik." {
 		t.Errorf("body %v", body)
 	}
 	if len(limited) != 1 || limited[0] != "auth" {
@@ -153,7 +153,7 @@ func TestMiddleware429(t *testing.T) {
 	if rr := serve(h, "203.0.113.2", ""); rr.Code != 200 {
 		t.Errorf("other IP: %d", rr.Code)
 	}
-	clk.Advance(6 * time.Second)
+	clk.Advance(time.Second)
 	if rr := serve(h, "203.0.113.1", ""); rr.Code != 200 {
 		t.Errorf("after refill: %d", rr.Code)
 	}
@@ -187,11 +187,95 @@ func TestMiddlewareFailsOpen(t *testing.T) {
 }
 
 func TestProfiles(t *testing.T) {
-	want := map[string]int{"public": 120, "write": 60, "upload": 20, "auth": 10}
-	for _, p := range Profiles() {
-		if p.Rate.Limit != want[p.Name] || p.Rate.Per != time.Minute || p.Key == nil {
+	// Pilot defaults (campus NAT, docs/integration/ops.md §2): limit, burst.
+	want := map[string][2]int{"public": {1200, 300}, "write": {120, 40}, "upload": {30, 10}, "auth": {60, 20}, "demo": {600, 100}}
+	ps := Profiles()
+	if len(ps) != len(want) {
+		t.Fatalf("%d profiles", len(ps))
+	}
+	for _, p := range ps {
+		w := want[p.Name]
+		if p.Rate.Limit != w[0] || p.Rate.Burst != w[1] || p.Rate.Per != time.Minute || p.Key == nil {
 			t.Errorf("profile %s: %+v", p.Name, p.Rate)
 		}
+	}
+}
+
+func TestRatesWithDefaults(t *testing.T) {
+	r := Rates{Write: Rate{Limit: 10, Burst: 2}, Upload: Rate{Limit: 0, Burst: 99}}.WithDefaults()
+	d := DefaultRates()
+	if r.Public != d.Public || r.Auth != d.Auth || r.Demo != d.Demo || r.Upload != d.Upload {
+		t.Fatalf("unset rates not defaulted: %+v", r)
+	}
+	if r.Write != (Rate{Limit: 10, Per: time.Minute, Burst: 2}) {
+		t.Fatalf("write = %+v", r.Write)
+	}
+	if p := Write.With(r.Write); p.Name != "write" || p.Rate.Limit != 10 || p.Key == nil {
+		t.Fatalf("With = %+v", p)
+	}
+}
+
+// campusChain mirrors the production wiring (internal/httpapi): the global public profile after the viewer is
+// known, then the per-route write/upload profile.
+func campusChain(m Limiter) (state, action, upload http.Handler) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	public := Middleware(m, Public, Options{})
+	return public(ok), public(Middleware(m, Write, Options{})(ok)), public(Middleware(m, Upload, Options{})(ok))
+}
+
+// A campus NAT: 300 signed-in students behind one IP, each loading the snapshot, doing 5 actions and uploading
+// 3 photos every minute (all at once, the worst case for a token bucket), for 5 minutes. Nobody gets a 429.
+func TestCampusNATNoFalsePositives(t *testing.T) {
+	clk := newClock()
+	m := NewMemory(MemoryOptions{Now: clk.Now})
+	state, action, upload := campusChain(m)
+	const ip = "36.72.0.1"
+	for minute := range 5 {
+		for u := range 300 {
+			user := fmt.Sprintf("u-%03d", u)
+			reqs := []http.Handler{state, action, action, action, action, action, upload, upload, upload}
+			for i, h := range reqs {
+				if rr := serve(h, ip, user); rr.Code != http.StatusOK {
+					t.Fatalf("minute %d user %s request %d: %d", minute, user, i, rr.Code)
+				}
+			}
+		}
+		clk.Advance(time.Minute)
+	}
+}
+
+// One IP flooding as a guest still hits the public limit at its burst, and gets the refill rate afterwards.
+func TestSingleIPFloodLimited(t *testing.T) {
+	clk := newClock()
+	m := NewMemory(MemoryOptions{Now: clk.Now})
+	state, _, _ := campusChain(m)
+	const ip = "203.0.113.66"
+	for i := range Public.Rate.Burst {
+		if rr := serve(state, ip, ""); rr.Code != http.StatusOK {
+			t.Fatalf("request %d: %d", i, rr.Code)
+		}
+	}
+	if rr := serve(state, ip, ""); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("request past the burst: %d", rr.Code)
+	}
+	clk.Advance(time.Second) // 1200/min = 20 tokens per second
+	for i := range 20 {
+		if rr := serve(state, ip, ""); rr.Code != http.StatusOK {
+			t.Fatalf("refilled request %d: %d", i, rr.Code)
+		}
+	}
+	if rr := serve(state, ip, ""); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("past the refill: %d", rr.Code)
+	}
+	// A signed-in user can still flood only their own bucket.
+	for range Public.Rate.Burst {
+		serve(state, ip, "u-flood")
+	}
+	if rr := serve(state, ip, "u-flood"); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("user flood: %d", rr.Code)
+	}
+	if rr := serve(state, ip, "u-other"); rr.Code != http.StatusOK {
+		t.Fatalf("other user behind the same IP: %d", rr.Code)
 	}
 }
 
