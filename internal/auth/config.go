@@ -3,6 +3,7 @@ package auth
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,15 +19,19 @@ const (
 
 // Tunables (ROADMAP F2.1/F2.2).
 const (
-	OTPTTL             = 5 * time.Minute
-	OTPMaxAttempts     = 5
-	OTPResendGap       = 60 * time.Second
-	OTPMaxPerPhoneHour = 5
-	OTPMaxPerIPHour    = 20
-	SessionTTL         = 30 * 24 * time.Hour
-	SessionTouchEvery  = 5 * time.Minute
-	SessionCookieName  = "sewain_session"
-	DemoOTPCode        = "123456"
+	OTPTTL         = 5 * time.Minute
+	OTPMaxAttempts = 5
+	OTPResendGap   = 60 * time.Second
+	// Defaults of the configurable OTP limits (Config.OTPMaxPerPhoneHour etc.).
+	DefaultOTPMaxPerPhoneHour = 5
+	// A campus NAT puts hundreds of students behind one IP (UGM pilot, registration booth), so the per-IP
+	// limit is high; the daily cap below is what bounds the SMS/WA bill.
+	DefaultOTPMaxPerIPHour   = 200
+	DefaultOTPMaxSendsPerDay = 2000
+	SessionTTL               = 30 * 24 * time.Hour
+	SessionTouchEvery        = 5 * time.Minute
+	SessionCookieName        = "sewain_session"
+	DemoOTPCode              = "123456"
 )
 
 // Config is the auth package configuration. Load it with ConfigFromEnv or fill it directly.
@@ -46,6 +51,28 @@ type Config struct {
 	// and session metadata. Only set it behind a proxy that overwrites the header.
 	ClientIPHeader string
 	Zenziva        ZenzivaConfig
+
+	// OTP limits, counted in otp_challenges so they hold across instances. Zero means the default.
+	OTPMaxPerPhoneHour int // OTP_MAX_PER_PHONE_HOUR
+	OTPMaxPerIPHour    int // OTP_MAX_PER_IP_HOUR (IPv6 per /64)
+	// OTPMaxSendsPerDay caps the codes sent by the whole service per WIB calendar day (OTP_MAX_SENDS_PER_DAY).
+	// Every code costs money (PRD §15.2), so this is the main defense against SMS/WA pumping.
+	OTPMaxSendsPerDay int
+}
+
+// MaxOTPLimit bounds the OTP_MAX_* settings.
+const MaxOTPLimit = 10_000_000
+
+// OTPLimits returns the effective OTP limits (defaults for unset values).
+func (c Config) OTPLimits() (perPhoneHour, perIPHour, perDay int) {
+	def := func(v, d int) int {
+		if v > 0 {
+			return v
+		}
+		return d
+	}
+	return def(c.OTPMaxPerPhoneHour, DefaultOTPMaxPerPhoneHour), def(c.OTPMaxPerIPHour, DefaultOTPMaxPerIPHour),
+		def(c.OTPMaxSendsPerDay, DefaultOTPMaxSendsPerDay)
 }
 
 // ValidateConfig rejects OTP providers that must never run in production (D10) and unknown providers.
@@ -113,6 +140,28 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	}
 	if err := ValidateConfig(c.AppEnv, c.DemoMode, c.OTPProvider); err != nil {
 		return c, err
+	}
+	for _, l := range []struct {
+		key string
+		dst *int
+		def int
+	}{
+		{"OTP_MAX_PER_PHONE_HOUR", &c.OTPMaxPerPhoneHour, DefaultOTPMaxPerPhoneHour},
+		{"OTP_MAX_PER_IP_HOUR", &c.OTPMaxPerIPHour, DefaultOTPMaxPerIPHour},
+		{"OTP_MAX_SENDS_PER_DAY", &c.OTPMaxSendsPerDay, DefaultOTPMaxSendsPerDay},
+	} {
+		*l.dst = l.def
+		v := get(l.key, "")
+		if v == "" {
+			continue
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 || n > MaxOTPLimit {
+			return c, fmt.Errorf("auth: %s must be a whole number between 1 and %d, or empty/0 for the default (got %q)", l.key, MaxOTPLimit, v)
+		}
+		if n > 0 {
+			*l.dst = n
+		}
 	}
 	if c.AppEnv == "production" && c.AllowBearerLogin {
 		return c, errors.New("auth: SESSION_BEARER_LOGIN=true is not allowed when APP_ENV=production")

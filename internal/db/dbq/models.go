@@ -472,6 +472,12 @@ type OtpChallenge struct {
 	ConsumedAt *time.Time
 }
 
+type OtpDailyCapAlert struct {
+	Day       time.Time
+	Cap       int
+	ReachedAt time.Time
+}
+
 type PaymentIntent struct {
 	ID                 string
 	BookingID          string

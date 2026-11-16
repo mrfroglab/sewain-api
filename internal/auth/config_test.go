@@ -192,3 +192,41 @@ func TestValidateConfigRejectsUnknownAppEnv(t *testing.T) {
 		t.Fatal("NewSender(echo) with APP_ENV=Production must fail")
 	}
 }
+
+func TestConfigFromEnvOTPLimits(t *testing.T) {
+	base := map[string]string{"APP_ENV": "staging", "OTP_PROVIDER": "echo", "OTP_PEPPER": base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", 32)))}
+	with := func(kv ...string) map[string]string {
+		m := map[string]string{}
+		for k, v := range base {
+			m[k] = v
+		}
+		for i := 0; i+1 < len(kv); i += 2 {
+			m[kv[i]] = kv[i+1]
+		}
+		return m
+	}
+	c, err := ConfigFromEnv(envMap(with()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, ip, day := c.OTPLimits(); p != 5 || ip != 200 || day != 2000 {
+		t.Fatalf("defaults = %d %d %d", p, ip, day)
+	}
+	c, err = ConfigFromEnv(envMap(with("OTP_MAX_PER_PHONE_HOUR", "3", "OTP_MAX_PER_IP_HOUR", "0", "OTP_MAX_SENDS_PER_DAY", " 500 ")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, ip, day := c.OTPLimits(); p != 3 || ip != 200 || day != 500 {
+		t.Fatalf("configured = %d %d %d", p, ip, day)
+	}
+	for _, bad := range []string{"-1", "abc", "1.5", "99999999999"} {
+		_, err := ConfigFromEnv(envMap(with("OTP_MAX_SENDS_PER_DAY", bad)))
+		if err == nil || !strings.Contains(err.Error(), "OTP_MAX_SENDS_PER_DAY") {
+			t.Fatalf("OTP_MAX_SENDS_PER_DAY=%q: %v", bad, err)
+		}
+	}
+	// A zero Config (filled directly, as tests do) uses the defaults.
+	if p, ip, day := (Config{}).OTPLimits(); p != DefaultOTPMaxPerPhoneHour || ip != DefaultOTPMaxPerIPHour || day != DefaultOTPMaxSendsPerDay {
+		t.Fatalf("zero config = %d %d %d", p, ip, day)
+	}
+}

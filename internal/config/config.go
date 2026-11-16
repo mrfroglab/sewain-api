@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/mrfroglab/sewain-api/internal/kyc"
 	"github.com/mrfroglab/sewain-api/internal/notify"
 	"github.com/mrfroglab/sewain-api/internal/platform/middleware"
+	"github.com/mrfroglab/sewain-api/internal/platform/ratelimit"
 )
 
 // App environments (APP_ENV).
@@ -45,6 +47,8 @@ type Config struct {
 	RequestTimeout    time.Duration
 	LogLevel          string
 	RetentionEvery    time.Duration // retention runner interval
+	// Rates are the HTTP rate-limit profiles (RATE_<PROFILE>_PER_MIN / RATE_<PROFILE>_BURST), defaults filled in.
+	Rates ratelimit.Rates
 
 	// Media.
 	MediaBackend    string // local | s3
@@ -110,6 +114,7 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 	}
 	c.RequestTimeout = duration("REQUEST_TIMEOUT", "15s")
 	c.RetentionEvery = duration("RETENTION_INTERVAL", "1h")
+	c.Rates = rates(getenv, fail)
 
 	prod := c.AppEnv == EnvProduction
 	switch c.AppEnv {
@@ -205,6 +210,45 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 		return c, configError(errs)
 	}
 	return c, nil
+}
+
+// MaxRateValue bounds RATE_* values: anything larger is a typo, not a limit.
+const MaxRateValue = 1_000_000
+
+// rates reads RATE_<PROFILE>_PER_MIN and RATE_<PROFILE>_BURST for every built-in profile. Empty or 0 keeps the
+// default; anything else must be a whole number between 1 and MaxRateValue.
+func rates(getenv func(string) string, fail func(string, ...any)) ratelimit.Rates {
+	r := ratelimit.DefaultRates()
+	for _, p := range []struct {
+		env  string
+		rate *ratelimit.Rate
+	}{{"PUBLIC", &r.Public}, {"WRITE", &r.Write}, {"UPLOAD", &r.Upload}, {"AUTH", &r.Auth}, {"DEMO", &r.Demo}} {
+		if n, ok := PositiveInt(getenv, "RATE_"+p.env+"_PER_MIN", MaxRateValue, fail); ok {
+			p.rate.Limit = n
+		}
+		if n, ok := PositiveInt(getenv, "RATE_"+p.env+"_BURST", MaxRateValue, fail); ok {
+			p.rate.Burst = n
+		}
+	}
+	return r
+}
+
+// PositiveInt reads an optional whole-number setting. It returns ok=false when the variable is empty or 0 (use
+// the default) and reports anything that is not a whole number in [1, upper] through fail.
+func PositiveInt(getenv func(string) string, key string, upper int, fail func(string, ...any)) (int, bool) {
+	v := strings.TrimSpace(getenv(key))
+	if v == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(v)
+	switch {
+	case err != nil || n < 0 || n > upper:
+		fail("%s must be a whole number between 1 and %d, or empty/0 for the default (got %q)", key, upper, v)
+		return 0, false
+	case n == 0:
+		return 0, false
+	}
+	return n, true
 }
 
 func configError(errs []error) error {

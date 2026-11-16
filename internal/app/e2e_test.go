@@ -229,9 +229,10 @@ func TestConfigEndpoint(t *testing.T) {
 	}
 }
 
-// TestOTPRateLimit: the auth profile (10/min, burst 5 per IP) answers 429 before the OTP gateway is reached.
+// TestOTPRateLimit: the auth profile as configured (here RATE_AUTH_PER_MIN=10, RATE_AUTH_BURST=5 per IP) answers 429
+// before the OTP gateway is reached.
 func TestOTPRateLimit(t *testing.T) {
-	a := apptest.New(t, apptest.Options{RealRateLimits: true})
+	a := apptest.New(t, apptest.Options{RealRateLimits: true, Env: map[string]string{"RATE_AUTH_PER_MIN": "10", "RATE_AUTH_BURST": "5"}})
 	var last apptest.Resp
 	for i := 0; i < 6; i++ {
 		last = a.Do(nil, apptest.Req{Method: "POST", Path: "/api/v1/auth/otp/request", JSON: map[string]any{"phone": "08123330000" + string(rune('0'+i))}})

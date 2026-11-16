@@ -52,7 +52,8 @@ type Options struct {
 	Scope string
 	// Env adds or overrides environment variables.
 	Env map[string]string
-	// RealRateLimits keeps the production rate-limit profiles (default: effectively unlimited).
+	// RealRateLimits keeps the configured rate-limit profiles (RATE_* in Env, else the defaults). Default:
+	// effectively unlimited.
 	RealRateLimits bool
 }
 
@@ -134,6 +135,7 @@ func New(t *testing.T, opt Options) *API {
 			Write:  ratelimit.Profile{Name: "write", Rate: big, Key: ratelimit.ByUser},
 			Upload: ratelimit.Profile{Name: "upload", Rate: big, Key: ratelimit.ByUser},
 			Auth:   ratelimit.Profile{Name: "auth", Rate: big, Key: ratelimit.ByIP},
+			Demo:   ratelimit.Profile{Name: "demo", Rate: big, Key: ratelimit.ByIP},
 		}
 	}
 	logOut := io.Writer(io.Discard)

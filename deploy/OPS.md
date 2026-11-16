@@ -30,7 +30,9 @@ curl -s https://<host>/api/v1/config  # appEnv, demoMode, paymentMode, otpProvid
 docker logs --since 5m <api> | grep -c '"level":"ERROR"'
 ```
 
-Staging: jalankan suite regresi web (`pnpm e2e --base https://sewain-staging.hallojanu.me`, 5 suite).
+Staging: jalankan suite regresi web dari repo `sewain-web`: `cd e2e && npm install && node run.mjs
+https://sewain-staging.hallojanu.me` (5 suite, reset data demo otomatis; set `CHROMIUM_PATH` kalau Chromium Playwright
+belum terpasang). Jangan arahkan ke produksi.
 
 Migrasi jalan otomatis saat start (advisory lock, aman dengan beberapa instance). Manual:
 `docker exec <api> /app/api migrate status`.
@@ -55,8 +57,10 @@ image yang rusak tidak terpasang lagi.
 
 ## 3. Backup dan restore
 
-Backup harian (timer systemd user 02:40): `pg_dump -Fc` + folder uploads, 7 harian + 4 mingguan, SHA256SUMS, salinan
-offsite terenkripsi kalau `BACKUP_REMOTE` diisi.
+Backup harian (`deploy/backup.sh`, dipasang ke `/opt/stacks/apps/<stack>/backup.sh`, timer systemd user
+`<stack>-backup.timer` pukul 02:15): `pg_dump -Fc` + `uploads.tar.gz`, 7 harian + 4 mingguan, SHA256SUMS, salinan offsite
+terenkripsi kalau `BACKUP_REMOTE` diisi di `backup.env`. Status terakhir: `/opt/stacks/backup/<stack>/last-status.json`
+(dipantau `healthcheck.sh`, alarm kalau gagal atau > 30 jam).
 
 Uji restore (wajib bulanan dan sebelum go-live; tidak menyentuh DB produksi):
 
@@ -67,18 +71,19 @@ Uji restore (wajib bulanan dan sebelum go-live; tidak menyentuh DB produksi):
 Restore penuh (data hilang/rusak):
 
 1. Umumkan maintenance. Hentikan API: `docker compose stop api` (DB tetap jalan).
-2. Pilih backup: `ls /opt/stacks/backup/<stack>/` lalu cek `sha256sum -c SHA256SUMS` di folder itu. Kalau lokal
+2. Pilih backup: `ls /opt/stacks/backup/<stack>/daily/` (atau `weekly/`) lalu cek `sha256sum -c SHA256SUMS` di folder itu. Kalau lokal
    rusak, ambil dari offsite: `rclone copy <BACKUP_REMOTE>/<tanggal> /tmp/restore-<tanggal>`.
 3. Simpan kondisi sekarang dulu (untuk forensik): `docker exec <db> pg_dump -U sewain -Fc sewain > /tmp/before-restore.dump`.
 4. Pulihkan DB:
 
    ```sh
    docker exec <db> psql -U sewain -d postgres -c "DROP DATABASE sewain WITH (FORCE)" -c "CREATE DATABASE sewain OWNER sewain"
-   docker exec -i <db> pg_restore -U sewain -d sewain --no-owner < /opt/stacks/backup/<stack>/<tanggal>/db.dump
+   docker exec -i <db> pg_restore -U sewain -d sewain --no-owner < /opt/stacks/backup/<stack>/daily/<tanggal>/db.dump
    ```
 
-5. Pulihkan berkas (storage lokal): `rsync -a --delete <backup>/uploads/ /opt/stacks/apps/<stack>/data/uploads/` lalu
-   `sudo chown -R 65532:65532 data/uploads` (user distroless). Dengan R2, objek tidak ikut backup lokal dan tidak
+5. Pulihkan berkas (storage lokal): pindahkan `data/uploads` lama ke samping, lalu
+   `tar -xzf /opt/stacks/backup/<stack>/daily/<tanggal>/uploads.tar.gz -C /opt/stacks/apps/<stack>/data/` dan
+   `sudo chown -R 65532:65532 /opt/stacks/apps/<stack>/data/uploads` (user distroless). Dengan R2, objek tidak ikut backup lokal dan tidak
    perlu dipulihkan (write-once, object lock).
 6. `docker compose start api`, cek §1 "Setelah deploy". Data setelah waktu backup hilang (RPO 24 jam): catat dan
    kabari pengguna terdampak.
