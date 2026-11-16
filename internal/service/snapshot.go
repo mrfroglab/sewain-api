@@ -56,7 +56,7 @@ func (s *Service) ETagFor(viewer *Viewer, version, clockOffset int64) string {
 
 // Snapshot builds the dataset for one viewer in a single read-only REPEATABLE READ transaction, so the version and
 // the rows are consistent. Visibility follows ROADMAP §4:
-//   - guest: active listings (location rounded ±250 m), public profiles, released reviews, configuration, wanted posts;
+//   - guest: active listings (location rounded ±250 m, no meeting point), public profiles, released reviews, configuration, wanted posts;
 //   - user:  the same + own profile, own listings (precise), own bookings and everything attached to them, own
 //     notifications/favorites/chat reads/reports/strikes/verifications, own reviews;
 //   - admin and scope "full": everything (v1 behavior).
@@ -170,6 +170,8 @@ func (s *Service) buildSnapshot(ctx context.Context, tx pgx.Tx, viewer *Viewer, 
 		dl := listingFromRow(l, photosOf[l.ID], optionsOf[l.ID])
 		if !all && l.OwnerID != me {
 			dl.Location.Lat, dl.Location.Lng = geo.FuzzPoint(l.ID, dl.Location.Lat, dl.Location.Lng)
+			// FR-S6: the meeting point opens only after ACCEPTED, on the booking (meetingPointDetail).
+			dl.MeetingPoint = nil
 		}
 		d.Listings = append(d.Listings, dl)
 	}
