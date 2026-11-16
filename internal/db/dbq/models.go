@@ -284,6 +284,34 @@ type KycSubmission struct {
 	FilesPurgedAt   *time.Time
 }
 
+type LedgerBalance struct {
+	Account string
+	Balance int64
+}
+
+type LedgerBalanceSnapshot struct {
+	Account     string
+	LastEntryID int64
+	Balance     int64
+	TakenAt     time.Time
+}
+
+type LedgerEntry struct {
+	ID      int64
+	TxnID   string
+	Account string
+	Amount  int64
+}
+
+type LedgerTxn struct {
+	ID        string
+	Kind      string
+	BookingID *string
+	IntentID  *string
+	Memo      string
+	CreatedAt time.Time
+}
+
 type Listing struct {
 	ID                   string
 	Ord                  int64
@@ -450,6 +478,43 @@ type OtpChallenge struct {
 	ConsumedAt *time.Time
 }
 
+type PaymentIntent struct {
+	ID                 string
+	BookingID          string
+	PayerID            string
+	Kind               string
+	Amount             int64
+	RentAmount         int64
+	CommissionRenter   int64
+	CommissionProvider int64
+	Status             string
+	Provider           string
+	ProviderRef        *string
+	QrString           *string
+	VaNumber           *string
+	ExpiresAt          time.Time
+	PaidAt             *time.Time
+	PaidLate           bool
+	FeeAmount          int64
+	RefundedAmount     int64
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}
+
+type Payout struct {
+	ID          string
+	UserID      string
+	Account     string
+	BookingID   *string
+	Amount      int64
+	Status      string
+	Provider    string
+	ProviderRef *string
+	Failure     string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
 type Photo struct {
 	ID         string
 	Ord        int64
@@ -480,6 +545,20 @@ type PushSubscription struct {
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 	LastSuccessAt *time.Time
+}
+
+type Refund struct {
+	ID          string
+	IntentID    string
+	BookingID   string
+	UserID      string
+	Amount      int64
+	Reason      string
+	Status      string
+	ProviderRef *string
+	Failure     string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 type Report struct {
@@ -611,4 +690,15 @@ type WantedPost struct {
 	Status       string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+}
+
+type WebhookEvent struct {
+	ID          int64
+	Provider    string
+	EventID     string
+	EventType   string
+	Payload     json.RawMessage
+	ReceivedAt  time.Time
+	ProcessedAt *time.Time
+	Result      string
 }
