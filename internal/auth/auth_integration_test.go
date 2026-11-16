@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mrfroglab/sewain-api/internal/auth"
 	"github.com/mrfroglab/sewain-api/internal/auth/authtest"
+	"github.com/mrfroglab/sewain-api/internal/platform/middleware"
 )
 
 var t0 = time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
@@ -565,4 +566,22 @@ func TestOTPPerIPLimitGroupsIPv6By64(t *testing.T) {
 	_, err := f.svc.RequestOTP(ctx, "081299990000", auth.RequestMeta{IP: "2001:db8:7:7:abcd::99"})
 	wantStatus(t, err, http.StatusTooManyRequests)
 	f.request(t, "081299990000", "2001:db8:7:8::1") // another /64 is another client
+}
+
+// Finding A4: docs/integration/ops.md promises that auth records the viewer with middleware.SetUserID, but
+// the middleware never did. Every ratelimit.ByUser limit (write, upload) therefore fell back to the client
+// IP, shared by a whole campus NAT, and access logs had no user id.
+func TestMiddlewareRecordsUserForPlatform(t *testing.T) {
+	f := newFixture(t, auth.EchoSender{})
+	v := f.login(t, "081233330000")
+	var got string
+	h := middleware.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = middleware.UserIDFrom(r.Context())
+	}), middleware.RequestID, f.svc.Middleware)
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/state", nil)
+	r.Header.Set("Authorization", "Bearer "+v.Token)
+	h.ServeHTTP(httptest.NewRecorder(), r)
+	if got != v.UserID {
+		t.Fatalf("middleware.UserIDFrom = %q, want %q", got, v.UserID)
+	}
 }

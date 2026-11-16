@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/mrfroglab/sewain-api/internal/platform/middleware"
 )
 
 type ctxKey struct{}
@@ -45,6 +47,8 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 			switch {
 			case err == nil:
 				v = viewer
+				// Per-user rate limits and access logs read the user from the platform request info.
+				middleware.SetUserID(r.Context(), v.UserID)
 				if touched && fromCookie {
 					s.SetSessionCookie(w, token)
 				}
@@ -119,11 +123,21 @@ func (s *Service) ClearSessionCookie(w http.ResponseWriter) {
 	})
 }
 
-// ClientIP returns the client IP: the trusted header (Config.ClientIPHeader) if set and present, otherwise
-// the connection's remote address.
+// ClientIP returns the client IP. When the platform chain ran (middleware.RealIP), its answer is used: it
+// only believes proxy headers from TRUSTED_PROXY_CIDRS. Otherwise the configured Config.ClientIPHeader is
+// read (for X-Forwarded-For the last hop, the one our own proxy appended; earlier hops are written by the
+// client), and finally the connection's remote address.
 func (s *Service) ClientIP(r *http.Request) string {
+	if ip := middleware.ClientIPFrom(r.Context()); ip != "" {
+		return ip
+	}
 	if h := s.Config.ClientIPHeader; h != "" {
-		if v := strings.TrimSpace(strings.Split(r.Header.Get(h), ",")[0]); v != "" {
+		hops := strings.Split(strings.Join(r.Header.Values(h), ","), ",")
+		v := hops[0]
+		if strings.EqualFold(h, "X-Forwarded-For") {
+			v = hops[len(hops)-1]
+		}
+		if v = strings.TrimSpace(v); v != "" {
 			return v
 		}
 	}
