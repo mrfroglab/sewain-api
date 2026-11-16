@@ -1,0 +1,19 @@
+{
+  "event": "refund.succeeded",
+  "business_id": "biz-test",
+  "created": "2026-11-20T08:00:00Z",
+  "api_version": "v3",
+  "data": {
+    "refund_id": "rfd-0001",
+    "reference_id": "rf-deposit-pi-test",
+    "business_id": "biz-test",
+    "payment_id": "py-1a2b3c4d-0000-4000-8000-000000000001",
+    "status": "SUCCEEDED",
+    "amount": 200000,
+    "currency": "IDR",
+    "channel_code": "QRIS",
+    "reason": "REQUESTED_BY_CUSTOMER",
+    "created": "2026-11-20T07:59:00Z",
+    "updated": "2026-11-20T08:00:00Z"
+  }
+}
