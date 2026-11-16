@@ -100,6 +100,9 @@ func (t *txn) acceptBooking(providerID, id domain.ID, meeting *string) error {
 	if b.Status != "REQUESTED" {
 		return domain.Fail("Request ini sudah tidak menunggu persetujuan.")
 	}
+	if t.now >= b.ExpiresAt { // FR-R3 holds even before the periodic job marks it EXPIRED
+		return domain.Fail("Request ini sudah kedaluwarsa.")
+	}
 	l := t.listingForUpdate(b.ListingID)
 	stock := 1
 	if l != nil {
