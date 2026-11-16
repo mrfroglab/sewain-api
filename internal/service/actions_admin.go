@@ -408,6 +408,11 @@ func (t *txn) offerWanted(providerID, wantedID domain.ID, listingID *domain.ID, 
 	if err := domain.CanTransact(t.user(providerID)); err != nil {
 		return err
 	}
+	if listingID != nil {
+		if l := t.listing(*listingID); l == nil || l.OwnerID != providerID || l.Status != "aktif" {
+			return domain.Fail("Tawarkan barang aktif milikmu sendiri.")
+		}
+	}
 	t.check(t.q.InsertWantedOffer(t.ctx, dbq.InsertWantedOfferParams{ID: domain.NewID("wo"), WantedID: wantedID, ProviderID: providerID,
 		ListingID: listingID, Message: message, At: tsOf(t.now)}))
 	t.touch(providerID, w.RequesterID)
