@@ -587,3 +587,51 @@ func TestPurgeContinuesPastAFailingSubmission(t *testing.T) {
 		t.Fatalf("second run = %d, %v", n, err)
 	}
 }
+
+// Finding K2 (UU PDP): there was no way to erase a user's identity data. Soft-deleting the user (core) kept
+// the encrypted NIK, name and the KTP/selfie objects forever (pending submissions are never purged), and a
+// hard delete cascaded the rows away but orphaned the encrypted files in the blob store. EraseUser deletes
+// the files and the rows; the NIK blacklist (an HMAC, needed against re-registration) stays.
+func TestEraseUserRemovesIdentityData(t *testing.T) {
+	f := newFixture(t)
+	a := f.submit(t, "u-a", nikA)
+	if _, err := f.svc.Decide(ctx, admin, a.ID, "reject", "buram"); err != nil {
+		t.Fatal(err)
+	}
+	a2 := f.submit(t, "u-a", nikA)
+	if _, err := f.svc.Decide(ctx, admin, a2.ID, "approve", ""); err != nil {
+		t.Fatal(err)
+	}
+	f.submit(t, "u-b", nikB) // another user's data must survive
+	if err := f.svc.BlacklistUser(ctx, admin, "u-a", "penipuan"); err != nil {
+		t.Fatal(err)
+	}
+	n, err := f.svc.EraseUser(ctx, "u-a")
+	if err != nil || n != 2 {
+		t.Fatalf("EraseUser = %d, %v", n, err)
+	}
+	for k := range f.blobs.Snapshot() {
+		if strings.Contains(k, a.ID) || strings.Contains(k, a2.ID) {
+			t.Fatalf("blob %s survived erase", k)
+		}
+	}
+	if len(f.blobs.Snapshot()) != 2 {
+		t.Fatalf("u-b's files must stay: %d blobs", len(f.blobs.Snapshot()))
+	}
+	var subs, ids, bl int
+	_ = f.db.QueryRow(ctx, `SELECT (SELECT count(*) FROM kyc_submissions WHERE user_id = 'u-a'),
+		(SELECT count(*) FROM identities WHERE user_id = 'u-a'), (SELECT count(*) FROM nik_blacklist)`).Scan(&subs, &ids, &bl)
+	if subs != 0 || ids != 0 || bl != 1 {
+		t.Fatalf("after erase: submissions=%d identities=%d blacklist=%d", subs, ids, bl)
+	}
+	if len(f.audit.Find("kyc.erase")) != 1 {
+		t.Fatal("erase must be audited")
+	}
+	// The blacklisted NIK still cannot be reused by a fresh account.
+	_, err = f.svc.Submit(ctx, "u-c", kyc.SubmitInput{NIK: nikA, NameOnKTP: "Budi", KTP: jpeg("k"), Selfie: png("s")})
+	wantStatus(t, err, http.StatusForbidden)
+	// Idempotent.
+	if n, err := f.svc.EraseUser(ctx, "u-a"); err != nil || n != 0 {
+		t.Fatalf("second erase = %d, %v", n, err)
+	}
+}

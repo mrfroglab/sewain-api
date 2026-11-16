@@ -513,6 +513,67 @@ func (s *Service) purgeOne(ctx context.Context, now time.Time, skip []string) (s
 	return id, true, tx.Commit(ctx)
 }
 
+// EraseUser removes a user's identity data for account deletion (UU PDP): the encrypted KTP/selfie objects
+// of every submission, the submissions and the verified identity. The NIK blacklist is kept (it holds only
+// an HMAC and is what stops a blacklisted person from re-registering). Files are deleted before the rows,
+// so a failure leaves everything in place for a retry. Idempotent; returns the number of submissions
+// erased. Call it from the core's account deletion, after revoking sessions.
+func (s *Service) EraseUser(ctx context.Context, userID string) (int, error) {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockKey(tx, ctx, "kyc:user:"+userID); err != nil {
+		return 0, err
+	}
+	rows, err := tx.Query(ctx, `SELECT id, ktp_object, selfie_object FROM kyc_submissions WHERE user_id = $1 FOR UPDATE`, userID)
+	if err != nil {
+		return 0, err
+	}
+	var keys []string
+	n := 0
+	for rows.Next() {
+		var id string
+		var ktp, selfie *string
+		if err := rows.Scan(&id, &ktp, &selfie); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		n++
+		// Derive the keys too, in case a row lost its object column but the file is still there.
+		keys = append(keys, objectKey(id, FileKTP), objectKey(id, FileSelfie))
+		for _, k := range []*string{ktp, selfie} {
+			if k != nil && *k != objectKey(id, FileKTP) && *k != objectKey(id, FileSelfie) {
+				keys = append(keys, *k)
+			}
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, k := range keys {
+		if err := s.Blobs.Delete(ctx, k); err != nil {
+			if ok, exErr := s.Blobs.Exists(ctx, k); exErr != nil || ok {
+				return 0, fmt.Errorf("kyc: erase %s: %w", k, err)
+			}
+		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM identities WHERE user_id = $1`, userID); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM kyc_submissions WHERE user_id = $1`, userID); err != nil {
+		return 0, err
+	}
+	if n > 0 {
+		if err := s.Auditor.Audit(ctx, "system", "kyc.erase", "user:"+userID, nil, nil); err != nil {
+			return 0, fmt.Errorf("kyc: audit erase: %w", err)
+		}
+	}
+	return n, tx.Commit(ctx)
+}
+
 // BlacklistNIK adds a NIK to the blacklist (admin). Future submissions and approvals with it are refused.
 func (s *Service) BlacklistNIK(ctx context.Context, v auth.Viewer, nik, reason string) error {
 	if err := auth.CheckAdmin(v); err != nil {
