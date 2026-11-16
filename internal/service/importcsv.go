@@ -31,7 +31,7 @@ var ImportColumns = []ImportColumn{
 	{"radius_km", false, "Jangkauan penyedia (km, default 3)."},
 	{"handover", true, "Cara serah terima, dipisah |: cod | jemput | kurir | antar."},
 	{"collateral", true, "Jaminan, dipisah |: identitas:KTM/SIM, deposit:50000, deposit:25%, barang:<deskripsi>."},
-	{"photos", true, "Minimal 3 URL foto dipisah | (mis. /img/listings/a.webp atau /api/v1/photos/<id>)."},
+	{"photos", true, "Minimal 3 foto dipisah |: id atau /api/v1/photos/<id> foto listing yang diunggah admin atau pemilik (tahap referensi). /img/… hanya di DEMO_MODE. URL luar ditolak."},
 	{"stock", false, "Jumlah unit (akun Toko saja, default 1)."},
 	{"meeting_point", false, "Titik temu publik (mis. \"Gerbang Pogung\")."},
 	{"late_fee_per_day", false, "Denda telat per hari (rupiah)."},
@@ -109,7 +109,7 @@ func (s *Service) ImportListings(ctx context.Context, adminID string, src io.Rea
 				}
 				return ""
 			}
-			l, owner, isNew, errs := t.importRow(get, owners, newOwners)
+			l, owner, isNew, errs := t.importRow(adminID, get, owners, newOwners)
 			if t.err != nil {
 				return nil
 			}
@@ -181,7 +181,7 @@ func readCSV(src io.Reader) ([][]string, error) {
 }
 
 // importRow builds (but does not insert) a listing and its owner from one CSV row; errs lists every problem.
-func (t *txn) importRow(get func(string) string, owners map[string]*domain.User, newOwners map[string]bool) (*domain.Listing, *domain.User, bool, []string) {
+func (t *txn) importRow(adminID domain.ID, get func(string) string, owners map[string]*domain.User, newOwners map[string]bool) (*domain.Listing, *domain.User, bool, []string) {
 	var errs []string
 	fail := func(msg string) { errs = append(errs, msg) }
 	num := func(col string, required bool) *int64 {
@@ -331,6 +331,15 @@ func (t *txn) importRow(get func(string) string, owners map[string]*domain.User,
 	id := t.pickID("", "l", t.q.ListingExists)
 	l := &domain.Listing{ID: id, Slug: id, OwnerID: owner.ID, Status: "aktif", CreatedAt: t.now, Stock: 1, Approval: "manual", RadiusKm: 3}
 	domain.ApplyListing(l, in)
+	// Photos uploaded by the importing admin (or by the owner) as listing photos; /img/… only in DEMO_MODE (L4).
+	photos, err := t.listingPhotos(l.Photos, nil, owner.ID, adminID)
+	if t.err != nil {
+		return nil, owner, isNew, nil
+	}
+	if err != nil {
+		return nil, owner, isNew, []string{"photos: " + err.Error()}
+	}
+	l.Photos = photos
 	if owner.AccountType != "toko" || l.Stock < 1 {
 		l.Stock = 1
 	}
