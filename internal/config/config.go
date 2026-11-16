@@ -169,6 +169,10 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 				fail("CORS_ORIGINS=* is not allowed when APP_ENV=production")
 			}
 		}
+		// D6: the session cookie is Secure in production (auth only turns it off when asked to).
+		if v := get("SESSION_COOKIE_SECURE", "true"); v != "true" {
+			fail("SESSION_COOKIE_SECURE=%s is not allowed when APP_ENV=production (the session cookie must be Secure)", v)
+		}
 	}
 	switch c.MediaBackend {
 	case "local", "s3", "r2":
