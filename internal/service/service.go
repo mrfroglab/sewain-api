@@ -20,6 +20,13 @@ import (
 	"github.com/mrfroglab/sewain-api/internal/domain"
 )
 
+// Payment modes (PAYMENT_MODE, ROADMAP D12).
+const (
+	PaymentSimulated = "simulated" // demo: "lunas" via a simulated QRIS/VA/e-wallet (default with DEMO_MODE)
+	PaymentOffline   = "offline"   // pilot: the renter pays the provider directly and marks it ("langsung")
+	PaymentGateway   = "gateway"   // reserved for Fase 8 (Xendit)
+)
+
 // Snapshot scopes (SNAPSHOT_SCOPE).
 const (
 	ScopeScoped = "scoped" // per viewer (ROADMAP §4), the default and the only scope allowed in production
@@ -29,6 +36,8 @@ const (
 type Options struct {
 	DemoMode      bool
 	SnapshotScope string
+	// PaymentMode: simulated | offline | gateway. Empty = simulated with DEMO_MODE, offline otherwise.
+	PaymentMode string
 	// Now is the real clock (the demo clock adds the stored offset). Tests inject a fake one.
 	Now func() time.Time
 	Log *slog.Logger
@@ -60,9 +69,11 @@ type Service struct {
 	opt  Options
 	log  *slog.Logger
 
-	mu        sync.RWMutex
-	listeners []func(Change)
-	notifiers []func(context.Context, pgx.Tx, *domain.Notification) error
+	mu          sync.RWMutex
+	listeners   []func(Change)
+	txListeners []func(context.Context, pgx.Tx, Change) error
+	notifiers   []func(context.Context, pgx.Tx, *domain.Notification) error
+	kycDecider  KYCDecider
 }
 
 func New(pool *pgxpool.Pool, opt Options) *Service {
@@ -71,6 +82,12 @@ func New(pool *pgxpool.Pool, opt Options) *Service {
 	}
 	if opt.SnapshotScope == "" {
 		opt.SnapshotScope = ScopeScoped
+	}
+	if opt.PaymentMode == "" {
+		opt.PaymentMode = PaymentOffline
+		if opt.DemoMode {
+			opt.PaymentMode = PaymentSimulated
+		}
 	}
 	if opt.Log == nil {
 		opt.Log = slog.Default()
@@ -81,11 +98,22 @@ func New(pool *pgxpool.Pool, opt Options) *Service {
 func (s *Service) Pool() *pgxpool.Pool { return s.pool }
 func (s *Service) DemoMode() bool      { return s.opt.DemoMode }
 
+// PaymentMode is the effective PAYMENT_MODE.
+func (s *Service) PaymentMode() string { return s.opt.PaymentMode }
+
 // OnChange registers a listener called after every committed change (realtime hub, outbox dispatcher, …).
 func (s *Service) OnChange(fn func(Change)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.listeners = append(s.listeners, fn)
+}
+
+// OnTxChange registers a hook for changes recorded inside a transaction owned by another module (auth, kyc); it
+// runs in that transaction before it commits (see PublishTx).
+func (s *Service) OnTxChange(fn func(ctx context.Context, tx pgx.Tx, ch Change) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.txListeners = append(s.txListeners, fn)
 }
 
 // OnNotification registers a hook that runs inside the transaction that creates an in-app notification

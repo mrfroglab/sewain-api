@@ -2,9 +2,11 @@ package service
 
 import (
 	"context"
+	"time"
 
 	"github.com/mrfroglab/sewain-api/internal/db/dbq"
 	"github.com/mrfroglab/sewain-api/internal/domain"
+	"github.com/mrfroglab/sewain-api/internal/media"
 )
 
 // PhotoStages accepted by the upload endpoints. KTP/selfie are never uploaded through these (PRD §7.2); the auth
@@ -90,6 +92,63 @@ func (s *Service) CanSeePhoto(ctx context.Context, p *domain.PhotoRecord, viewer
 		return true, nil
 	}
 	b, err := s.q.GetBooking(ctx, *p.BookingID)
+	if err != nil {
+		if isNoRows(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return b.RenterID == viewer.UserID || b.ProviderID == viewer.UserID, nil
+}
+
+// LookupPhoto is the media handler's PhotoLookup (GET /api/v1/photos/{id}): the photo row with its booking (nil for
+// listing photos). Returns media.ErrNotFound for unknown ids and for photos without a stored object (bundled demo
+// images keep their static /img/… URL).
+func (s *Service) LookupPhoto(ctx context.Context, id string) (media.Photo, *media.Booking, error) {
+	var p media.Photo
+	var objectKey, mime *string
+	var bytes *int64
+	var width, height *int
+	var bID, bCode, bRenter, bProvider, bStatus *string
+	var bCompleted, bResolved *time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT p.id, p.stage, coalesce(p.booking_id, ''), coalesce(p.listing_id, ''), p.uploader_id, p.object_key, p.sha256, p.mime,
+		       p.bytes, p.width, p.height, p.server_ts, b.id, b.code, b.renter_id, b.provider_id, b.status, b.completed_at, b.resolved_at
+		FROM photos p LEFT JOIN bookings b ON b.id = p.booking_id
+		WHERE p.id = $1`, id).Scan(&p.ID, &p.Stage, &p.BookingID, &p.ListingID, &p.UploaderID, &objectKey, &p.SHA256, &mime,
+		&bytes, &width, &height, &p.ServerTime, &bID, &bCode, &bRenter, &bProvider, &bStatus, &bCompleted, &bResolved)
+	if isNoRows(err) || (err == nil && objectKey == nil) {
+		return media.Photo{}, nil, media.ErrNotFound
+	}
+	if err != nil {
+		return media.Photo{}, nil, err
+	}
+	p.ObjectKey, p.MIME = *objectKey, domain.Deref(mime, "")
+	if bytes != nil {
+		p.Bytes = *bytes
+	}
+	if width != nil {
+		p.Width = *width
+	}
+	if height != nil {
+		p.Height = *height
+	}
+	if bID == nil {
+		return p, nil, nil
+	}
+	return p, &media.Booking{ID: *bID, Code: *bCode, RenterID: *bRenter, ProviderID: *bProvider, Status: *bStatus,
+		CompletedAt: bCompleted, ResolvedAt: bResolved}, nil
+}
+
+// CanUploadTo: only the parties of a booking (and admins, e.g. as mediator) attach photos to it.
+func (s *Service) CanUploadTo(ctx context.Context, bookingID string, viewer *Viewer) (bool, error) {
+	if viewer.IsAdmin() {
+		return true, nil
+	}
+	if viewer == nil {
+		return false, nil
+	}
+	b, err := s.q.GetBooking(ctx, bookingID)
 	if err != nil {
 		if isNoRows(err) {
 			return false, nil

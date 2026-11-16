@@ -11,9 +11,10 @@ SELECT EXISTS (SELECT 1 FROM listings WHERE id = $1);
 SELECT * FROM listing_rows ORDER BY ord DESC;
 
 -- name: ListListingsVisibleTo :many
--- Active listings, the viewer's own listings (any status) and listings of the viewer's bookings.
+-- Active listings of active owners, the viewer's own listings (any status) and listings of the viewer's bookings.
 SELECT * FROM listing_rows l
-WHERE l.status = 'aktif' OR l.owner_id = @viewer
+WHERE (l.status = 'aktif' AND EXISTS (SELECT 1 FROM users o WHERE o.id = l.owner_id AND o.status = 'aktif' AND o.deleted_at IS NULL))
+   OR l.owner_id = @viewer
    OR EXISTS (SELECT 1 FROM bookings b WHERE b.listing_id = l.id AND (b.renter_id = @viewer OR b.provider_id = @viewer))
 ORDER BY ord DESC;
 
@@ -98,17 +99,18 @@ DELETE FROM favorites WHERE user_id = @user_id AND listing_id = @listing_id;
 INSERT INTO favorites (user_id, listing_id, ord) VALUES (@user_id, @listing_id, nextval('row_ord_seq'));
 
 -- name: SearchListings :many
--- Two-way radius rule (FR-S3): visible when distance ≤ renter radius AND ≤ provider reach, i.e.
--- ST_DWithin(location, point, LEAST(renter_radius, provider_radius)). Full-text (simple config) and date availability
--- (stock-aware, FR-R4/FR-S4) are optional. Ordered by distance, then relevance.
+-- Candidates for the search (FR-S3/FR-S4): active listings of active owners within @radius_m of the point, plus
+-- filters. The caller passes the search radius plus a margin larger than the public-location fuzz and decides
+-- membership, distance and the two-way reach on the PUBLIC point (geo.FuzzPoint), so results never act as an oracle
+-- on the precise location (review C1).
 WITH pt AS (SELECT ST_SetSRID(ST_MakePoint(@lng::float8, @lat::float8), 4326)::geography AS g)
-SELECT l.id,
-       (ST_Distance(l.location, pt.g) / 1000)::float8 AS distance_km,
-       ST_DWithin(l.location, pt.g, LEAST(@radius_m::float8, l.radius_km * 1000))::boolean AS visible
+SELECT l.id, l.lat, l.lng, l.radius_km,
+       (CASE WHEN sqlc.narg(tsquery)::text IS NULL THEN 0
+             ELSE ts_rank(l.search, to_tsquery('simple', sqlc.narg(tsquery)::text)) END)::float8 AS rank
 FROM listings l
 JOIN users u ON u.id = l.owner_id
 CROSS JOIN pt
-WHERE l.status = 'aktif' AND u.status = 'aktif'
+WHERE l.status = 'aktif' AND u.status = 'aktif' AND u.deleted_at IS NULL
   AND ST_DWithin(l.location, pt.g, @radius_m::float8)
   AND (sqlc.narg(category)::text IS NULL OR l.category = sqlc.narg(category)::text)
   AND (sqlc.narg(min_price)::bigint IS NULL OR l.price_per_day >= sqlc.narg(min_price)::bigint)
@@ -122,7 +124,4 @@ WHERE l.status = 'aktif' AND u.status = 'aktif'
         SELECT count(*) FROM bookings b
         WHERE b.listing_id = l.id AND b.status IN ('ACCEPTED', 'ACTIVE')
           AND b.start_date <= sqlc.narg(end_date)::date AND sqlc.narg(start_date)::date <= b.end_date) < l.stock)
-ORDER BY distance_km,
-         CASE WHEN sqlc.narg(tsquery)::text IS NULL THEN 0
-              ELSE ts_rank(l.search, to_tsquery('simple', sqlc.narg(tsquery)::text)) END DESC,
-         l.id;
+ORDER BY l.id;

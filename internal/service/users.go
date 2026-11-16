@@ -2,9 +2,6 @@ package service
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"strings"
 
@@ -104,36 +101,53 @@ func (s *Service) CreateUser(ctx context.Context, tx pgx.Tx, phone, name string)
 	return u, ch, err
 }
 
-// Publish tells the change listeners about a change committed outside Service.run (see CreateUser).
+// Publish tells the change listeners about a change committed outside Service.run (see CreateUser). Prefer
+// PublishTx before the commit when the caller owns the transaction.
 func (s *Service) Publish(ch Change) {
 	if ch.Version > 0 {
 		s.emit(ch)
 	}
 }
 
-/* ---------------------------------------------------------- demo sessions */
-
-// HashToken is how session tokens are stored (never the token itself).
-func HashToken(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:])
+// PublishTx runs the transaction-change hooks (OnTxChange) for a change recorded in a transaction the service does
+// not own (CreateUser, KYC hooks). The realtime publisher queues a NOTIFY there, delivered only if it commits.
+func (s *Service) PublishTx(ctx context.Context, tx pgx.Tx, ch Change) error {
+	if ch.Version == 0 {
+		return nil
+	}
+	s.mu.RLock()
+	hooks := append([]func(context.Context, pgx.Tx, Change) error{}, s.txListeners...)
+	s.mu.RUnlock()
+	for _, h := range hooks {
+		if err := h(ctx, tx, ch); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// CreateDemoSession issues a bearer token for a user (DEMO_MODE persona login). Only its SHA-256 is stored.
-func (s *Service) CreateDemoSession(ctx context.Context, userID string) (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
+// SetRoleByPhone gives or takes the admin role (CLI `api admin grant|revoke <phone>`, F2.5). The user must exist
+// (signed in once). Audited with the given actor.
+func (s *Service) SetRoleByPhone(ctx context.Context, phone, role, actor string) (string, error) {
+	if role != "admin" && role != "user" {
+		return "", domain.Fail("Role harus admin atau user.")
 	}
-	token := hex.EncodeToString(b)
-	return token, s.q.InsertDemoSession(ctx, dbq.InsertDemoSessionParams{TokenHash: HashToken(token), UserID: userID})
-}
-
-// DemoSessionUser resolves a demo token to its user id ("" when unknown).
-func (s *Service) DemoSessionUser(ctx context.Context, token string) (string, error) {
-	uid, err := s.q.DemoSessionUser(ctx, HashToken(token))
-	if isNoRows(err) {
-		return "", nil
-	}
-	return uid, err
+	var id string
+	_, err := s.run(ctx, func(t *txn) error {
+		r, err := t.q.FindUserByPhone(t.ctx, NormalizePhone(phone))
+		if !t.found(err) {
+			if t.err == nil {
+				return domain.Fail("Tidak ada akun dengan nomor itu. Pengguna harus masuk sekali dulu.")
+			}
+			return nil
+		}
+		id = r.ID
+		_, err = t.tx.Exec(t.ctx, `UPDATE users SET role = $2, updated_at = now() WHERE id = $1`, r.ID, role)
+		t.check(err)
+		t.touch(r.ID)
+		t.touchPublic()
+		t.audit(actor, "user.role", r.ID, domain.Ptr(r.Role), domain.Ptr(role))
+		return nil
+	})
+	return id, err
 }

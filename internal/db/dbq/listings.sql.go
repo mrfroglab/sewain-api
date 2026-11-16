@@ -673,12 +673,13 @@ func (q *Queries) ListListings(ctx context.Context) ([]ListingRow, error) {
 
 const listListingsVisibleTo = `-- name: ListListingsVisibleTo :many
 SELECT id, ord, slug, owner_id, title, category, description, condition_notes, price_per_day, price_per_hour, price_per_week, duration_discount, min_days, max_days, item_value, lat, lng, area_id, radius_km, handover, meeting_point, handover_hours, late_fee_per_day, late_fee_cap_percent, cancellation, special_rules, approval, auto_approve_min_rating, stock, vehicle, status, rent_count, base_rating, base_rating_count, created_at, updated_at FROM listing_rows l
-WHERE l.status = 'aktif' OR l.owner_id = $1
+WHERE (l.status = 'aktif' AND EXISTS (SELECT 1 FROM users o WHERE o.id = l.owner_id AND o.status = 'aktif' AND o.deleted_at IS NULL))
+   OR l.owner_id = $1
    OR EXISTS (SELECT 1 FROM bookings b WHERE b.listing_id = l.id AND (b.renter_id = $1 OR b.provider_id = $1))
 ORDER BY ord DESC
 `
 
-// Active listings, the viewer's own listings (any status) and listings of the viewer's bookings.
+// Active listings of active owners, the viewer's own listings (any status) and listings of the viewer's bookings.
 func (q *Queries) ListListingsVisibleTo(ctx context.Context, viewer string) ([]ListingRow, error) {
 	rows, err := q.db.Query(ctx, listListingsVisibleTo, viewer)
 	if err != nil {
@@ -773,33 +774,31 @@ func (q *Queries) ListingExists(ctx context.Context, id string) (bool, error) {
 
 const searchListings = `-- name: SearchListings :many
 WITH pt AS (SELECT ST_SetSRID(ST_MakePoint($11::float8, $12::float8), 4326)::geography AS g)
-SELECT l.id,
-       (ST_Distance(l.location, pt.g) / 1000)::float8 AS distance_km,
-       ST_DWithin(l.location, pt.g, LEAST($1::float8, l.radius_km * 1000))::boolean AS visible
+SELECT l.id, l.lat, l.lng, l.radius_km,
+       (CASE WHEN $1::text IS NULL THEN 0
+             ELSE ts_rank(l.search, to_tsquery('simple', $1::text)) END)::float8 AS rank
 FROM listings l
 JOIN users u ON u.id = l.owner_id
 CROSS JOIN pt
-WHERE l.status = 'aktif' AND u.status = 'aktif'
-  AND ST_DWithin(l.location, pt.g, $1::float8)
-  AND ($2::text IS NULL OR l.category = $2::text)
-  AND ($3::bigint IS NULL OR l.price_per_day >= $3::bigint)
-  AND ($4::bigint IS NULL OR l.price_per_day <= $4::bigint)
-  AND ($5::text IS NULL OR $5::text = ANY (l.handover))
-  AND ($6::text IS NULL OR EXISTS (
-        SELECT 1 FROM collateral_options o WHERE o.listing_id = l.id AND o.kind = $6::text))
-  AND ($7::text IS NULL OR u.account_type = $7::text)
-  AND ($8::text IS NULL OR l.search @@ to_tsquery('simple', $8::text))
+WHERE l.status = 'aktif' AND u.status = 'aktif' AND u.deleted_at IS NULL
+  AND ST_DWithin(l.location, pt.g, $2::float8)
+  AND ($3::text IS NULL OR l.category = $3::text)
+  AND ($4::bigint IS NULL OR l.price_per_day >= $4::bigint)
+  AND ($5::bigint IS NULL OR l.price_per_day <= $5::bigint)
+  AND ($6::text IS NULL OR $6::text = ANY (l.handover))
+  AND ($7::text IS NULL OR EXISTS (
+        SELECT 1 FROM collateral_options o WHERE o.listing_id = l.id AND o.kind = $7::text))
+  AND ($8::text IS NULL OR u.account_type = $8::text)
+  AND ($1::text IS NULL OR l.search @@ to_tsquery('simple', $1::text))
   AND ($9::date IS NULL OR $10::date IS NULL OR (
         SELECT count(*) FROM bookings b
         WHERE b.listing_id = l.id AND b.status IN ('ACCEPTED', 'ACTIVE')
           AND b.start_date <= $10::date AND $9::date <= b.end_date) < l.stock)
-ORDER BY distance_km,
-         CASE WHEN $8::text IS NULL THEN 0
-              ELSE ts_rank(l.search, to_tsquery('simple', $8::text)) END DESC,
-         l.id
+ORDER BY l.id
 `
 
 type SearchListingsParams struct {
+	Tsquery      *string
 	RadiusM      float64
 	Category     *string
 	MinPrice     *int64
@@ -807,7 +806,6 @@ type SearchListingsParams struct {
 	Handover     *string
 	Collateral   *string
 	ProviderType *string
-	Tsquery      *string
 	StartDate    *time.Time
 	EndDate      *time.Time
 	Lng          float64
@@ -815,16 +813,20 @@ type SearchListingsParams struct {
 }
 
 type SearchListingsRow struct {
-	ID         string
-	DistanceKm float64
-	Visible    bool
+	ID       string
+	Lat      float64
+	Lng      float64
+	RadiusKm float64
+	Rank     float64
 }
 
-// Two-way radius rule (FR-S3): visible when distance ≤ renter radius AND ≤ provider reach, i.e.
-// ST_DWithin(location, point, LEAST(renter_radius, provider_radius)). Full-text (simple config) and date availability
-// (stock-aware, FR-R4/FR-S4) are optional. Ordered by distance, then relevance.
+// Candidates for the search (FR-S3/FR-S4): active listings of active owners within @radius_m of the point, plus
+// filters. The caller passes the search radius plus a margin larger than the public-location fuzz and decides
+// membership, distance and the two-way reach on the PUBLIC point (geo.FuzzPoint), so results never act as an oracle
+// on the precise location (review C1).
 func (q *Queries) SearchListings(ctx context.Context, arg SearchListingsParams) ([]SearchListingsRow, error) {
 	rows, err := q.db.Query(ctx, searchListings,
+		arg.Tsquery,
 		arg.RadiusM,
 		arg.Category,
 		arg.MinPrice,
@@ -832,7 +834,6 @@ func (q *Queries) SearchListings(ctx context.Context, arg SearchListingsParams) 
 		arg.Handover,
 		arg.Collateral,
 		arg.ProviderType,
-		arg.Tsquery,
 		arg.StartDate,
 		arg.EndDate,
 		arg.Lng,
@@ -845,7 +846,13 @@ func (q *Queries) SearchListings(ctx context.Context, arg SearchListingsParams) 
 	items := []SearchListingsRow{}
 	for rows.Next() {
 		var i SearchListingsRow
-		if err := rows.Scan(&i.ID, &i.DistanceKm, &i.Visible); err != nil {
+		if err := rows.Scan(
+			&i.ID,
+			&i.Lat,
+			&i.Lng,
+			&i.RadiusKm,
+			&i.Rank,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

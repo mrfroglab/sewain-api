@@ -28,7 +28,8 @@ func (s *Service) IsEmpty(ctx context.Context) (bool, error) {
 
 // ResetDemo replaces all data with the demo seed anchored at the real "now", in one transaction (truncate + seed).
 // The demo clock goes back to real time. Photo and audit rows are evidence tables, so the reset opts in to deleting
-// them (sewain.retention).
+// them (sewain.retention). Live sessions of users that exist again after the reseed (the demo personas) are kept,
+// so web tabs stay signed in across a reset like in v1.
 func (s *Service) ResetDemo(ctx context.Context) (Change, error) {
 	d, err := seed.Build(s.realNow())
 	if err != nil {
@@ -37,10 +38,15 @@ func (s *Service) ResetDemo(ctx context.Context) (Change, error) {
 	return s.run(ctx, func(t *txn) error {
 		_, err := t.tx.Exec(t.ctx, `SET LOCAL sewain.retention = 'on'`)
 		t.check(err)
+		_, err = t.tx.Exec(t.ctx, `CREATE TEMP TABLE keep_sessions ON COMMIT DROP AS
+			SELECT * FROM auth_sessions WHERE revoked_at IS NULL AND expires_at > now()`)
+		t.check(err)
 		_, err = t.tx.Exec(t.ctx, `TRUNCATE `+strings.Join(coreTables, ", ")+` CASCADE`)
 		t.check(err)
 		t.now = s.realNow()
 		t.loadData(d)
+		_, err = t.tx.Exec(t.ctx, `INSERT INTO auth_sessions SELECT k.* FROM keep_sessions k WHERE EXISTS (SELECT 1 FROM users u WHERE u.id = k.user_id)`)
+		t.check(err)
 		t.touchPublic()
 		return nil
 	})

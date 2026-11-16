@@ -354,6 +354,31 @@ func (t *txn) photosExist(ids []domain.ID) bool {
 // notify is the single place that creates in-app notifications (hooks registered with Service.OnNotification run
 // here, in the same transaction, e.g. to enqueue push/email outbox rows).
 func (t *txn) notify(userID domain.ID, kind, title, body, href string) {
+	if userID == domain.AdminID {
+		// The admin queue: every admin account (the demo seed's u-admin is one; production admins are granted with
+		// `api admin grant` and have ordinary ids).
+		rows, err := t.tx.Query(t.ctx, `SELECT id FROM users WHERE role = 'admin' AND deleted_at IS NULL ORDER BY id`)
+		if !t.check(err) {
+			return
+		}
+		var admins []string
+		for rows.Next() {
+			var id string
+			if t.check(rows.Scan(&id)) {
+				admins = append(admins, id)
+			}
+		}
+		rows.Close()
+		t.check(rows.Err())
+		for _, id := range admins {
+			t.notifyUser(id, kind, title, body, href)
+		}
+		return
+	}
+	t.notifyUser(userID, kind, title, body, href)
+}
+
+func (t *txn) notifyUser(userID domain.ID, kind, title, body, href string) {
 	n := &domain.Notification{ID: domain.NewID("n"), UserID: userID, Kind: kind, Title: title, Body: body, At: t.now}
 	if href != "" {
 		n.Href = domain.Ptr(href)

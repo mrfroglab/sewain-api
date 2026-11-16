@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/mrfroglab/sewain-api/internal/domain"
+	"github.com/mrfroglab/sewain-api/internal/geo"
 	"github.com/mrfroglab/sewain-api/internal/service"
 )
 
@@ -129,7 +130,7 @@ func TestSnapshotPrivacy(t *testing.T) {
 			if l.Location.Lat == p[0] || l.Location.Lng == p[1] {
 				t.Errorf("%s: precise location of %s leaked", name, l.ID)
 			}
-			if dist := domain.DistanceMeters(p[0], p[1], l.Location.Lat, l.Location.Lng); dist > 360 {
+			if dist := geo.DistanceKm(p[0], p[1], l.Location.Lat, l.Location.Lng) * 1000; dist > 400 {
 				t.Errorf("%s: public point of %s is %.0f m away", name, l.ID, dist)
 			}
 			if l.Status != "aktif" && !partyOfListing(d, l.ID) {

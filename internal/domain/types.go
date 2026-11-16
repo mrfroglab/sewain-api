@@ -46,6 +46,17 @@ type User struct {
 	BaseRating      *float64     `json:"baseRating,omitempty"`
 	BaseRatingCount *int         `json:"baseRatingCount,omitempty"`
 	Demo            *DemoInfo    `json:"demo,omitempty"`
+	// PublicStats is computed by the server for every profile in a snapshot (web-v2 needs #6).
+	PublicStats *PublicStats `json:"publicStats,omitempty"`
+}
+
+// PublicStats are the public reputation numbers of a user, computed on the server because a scoped snapshot does
+// not carry other people's bookings, disputes or strikes.
+type PublicStats struct {
+	CompletedRentals int `json:"completedRentals"` // COMPLETED bookings as renter or provider + baseRatingCount
+	Disputes         int `json:"disputes"`         // disputes on bookings the user is a party of
+	TrustScore       int `json:"trustScore"`       // 0–100, TrustScore
+	Strikes          int `json:"strikes"`          // public (PRD §11.2 L3 "pernah bersengketa" badge)
 }
 
 type VerificationRequest struct {
@@ -201,13 +212,15 @@ type Agreement struct {
 }
 
 type PaymentInfo struct {
-	Status     string  `json:"status"` // belum | lunas
-	Method     *string `json:"method,omitempty"`
-	PaidAt     *int64  `json:"paidAt,omitempty"`
-	Rent       int64   `json:"rent"`
-	Deposit    int64   `json:"deposit"`
-	Commission int64   `json:"commission"`
-	Total      int64   `json:"total"`
+	Status string  `json:"status"`           // belum | lunas
+	Method *string `json:"method,omitempty"` // qris | va | ewallet | tunai (simulated) | langsung (offline)
+	PaidAt *int64  `json:"paidAt,omitempty"`
+	// ConfirmedAt: the provider confirmed receiving a direct ("langsung") payment (PAYMENT_MODE=offline).
+	ConfirmedAt *int64 `json:"confirmedAt,omitempty"`
+	Rent        int64  `json:"rent"`
+	Deposit     int64  `json:"deposit"`
+	Commission  int64  `json:"commission"`
+	Total       int64  `json:"total"`
 }
 
 type Checkout struct {
@@ -305,6 +318,8 @@ type Review struct {
 	Rating    float64 `json:"rating"`
 	Comment   string  `json:"comment"`
 	CreatedAt int64   `json:"createdAt"`
+	// VisibleAt is when the review is (or becomes) visible to others (FR-T2): both parties reviewed, or +7 days.
+	VisibleAt *int64 `json:"visibleAt,omitempty"`
 }
 
 type Report struct {
@@ -447,4 +462,17 @@ type Data struct {
 	Favorites       map[ID][]ID            `json:"favorites"`
 	ChatReads       map[string]int64       `json:"chatReads"`
 	BookingCounter  int                    `json:"bookingCounter"`
+	// Scope is "full" (everything, demo fallback) or "scoped" (per viewer, ROADMAP §4); ViewerID is null for guests.
+	Scope    string  `json:"scope"`
+	ViewerID *string `json:"viewerId"`
+	// ListingBusy: committed date ranges per listing in the snapshot (ACCEPTED/ACTIVE/DISPUTED, end ≥ today),
+	// merged, with the number of units in use. No renter identity.
+	ListingBusy map[ID][]BusyRange `json:"listingBusy"`
+}
+
+// BusyRange is a run of days on which Count units of a listing are booked.
+type BusyRange struct {
+	Start string `json:"start"` // YYYY-MM-DD (Asia/Jakarta)
+	End   string `json:"end"`
+	Count int    `json:"count"`
 }

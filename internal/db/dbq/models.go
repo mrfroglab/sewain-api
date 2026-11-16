@@ -195,12 +195,6 @@ type Consent struct {
 	UserAgent  string
 }
 
-type DemoSession struct {
-	TokenHash string
-	UserID    string
-	CreatedAt time.Time
-}
-
 type Dispute struct {
 	ID             string
 	Ord            int64

@@ -276,6 +276,9 @@ func (t *txn) setUserStatus(adminID, userID domain.ID, status, reason string) er
 	old := u.Status
 	u.Status = status
 	t.saveUser(u)
+	if status == "blacklist" {
+		t.blacklistIdentity(adminID, userID, reason)
+	}
 	if status != "aktif" {
 		ls, err := t.q.ListActiveListingsByOwnerForUpdate(t.ctx, userID)
 		t.check(err)

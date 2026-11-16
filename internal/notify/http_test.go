@@ -80,6 +80,14 @@ func TestPushEndpoints(t *testing.T) {
 	if subscriptionCount(t, a.DB, "u-a") != 0 || subscriptionCount(t, a.DB, "u-b") != 1 {
 		t.Fatal("subscription did not move to the new user")
 	}
+	// Someone who only knows the endpoint URL (other keys) cannot take it over (review L2).
+	stolen := `{"endpoint":"` + ep + `","keys":{"p256dh":"` + testP256dh + `","auth":"eHh4eHh4eHh4eHh4eHh4eA"}}`
+	if code, out := call(t, h, "POST", "/api/v1/push/subscriptions", "u-c", stolen); code != 409 || out["ok"] != false {
+		t.Fatalf("takeover with other keys: %d %v", code, out)
+	}
+	if subscriptionCount(t, a.DB, "u-b") != 1 || subscriptionCount(t, a.DB, "u-c") != 0 {
+		t.Fatal("subscription must stay with u-b")
+	}
 	// u-a cannot delete u-b's subscription.
 	if code, out := call(t, h, "DELETE", "/api/v1/push/subscriptions", "u-a", `{"endpoint":"`+ep+`"}`); code != 200 || out["removed"] != false {
 		t.Fatalf("foreign delete: %d %v", code, out)

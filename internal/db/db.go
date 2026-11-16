@@ -83,9 +83,34 @@ func WithTx(ctx context.Context, pool *pgxpool.Pool, opts pgx.TxOptions, fn func
 
 // Advisory lock keys (pg_advisory_*). Other modules pick their own keys outside this block.
 const (
-	LockMigrate int64 = 0x5e3a_0001
-	LockJobs    int64 = 0x5e3a_0002
+	LockMigrate   int64 = 0x5e3a_0001
+	LockJobs      int64 = 0x5e3a_0002
+	LockRetention int64 = 0x5e3a_0003
 )
+
+// WithSessionLock runs fn while holding a session-level advisory lock on one pooled connection, so work spread over
+// several transactions (e.g. the retention job) runs on one instance at a time. It returns false without calling fn
+// when another session holds the lock.
+func WithSessionLock(ctx context.Context, pool *pgxpool.Pool, key int64, fn func(ctx context.Context) error) (bool, error) {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer conn.Release()
+	var ok bool
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, key).Scan(&ok); err != nil || !ok {
+		return false, err
+	}
+	defer func() {
+		// A fresh context: the unlock must happen even when ctx was cancelled during fn.
+		uctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := conn.Exec(uctx, `SELECT pg_advisory_unlock($1)`, key); err != nil {
+			_ = conn.Conn().Close(uctx) // dropping the connection releases the lock
+		}
+	}()
+	return true, fn(ctx)
+}
 
 // TryXactLock takes a transaction-scoped advisory lock without waiting. It is released at commit/rollback.
 func TryXactLock(ctx context.Context, tx pgx.Tx, key int64) (bool, error) {

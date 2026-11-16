@@ -205,7 +205,7 @@ func messageFromRow(r dbq.Message) *domain.Message {
 
 func reviewFromRow(r dbq.Review) *domain.Review {
 	return &domain.Review{ID: r.ID, BookingID: r.BookingID, ListingID: r.ListingID, FromID: r.FromID, ToID: r.ToID, FromRole: r.FromRole,
-		Rating: r.Rating, Comment: r.Comment, CreatedAt: msOf(r.CreatedAt)}
+		Rating: r.Rating, Comment: r.Comment, CreatedAt: msOf(r.CreatedAt), VisibleAt: domain.Ptr(msOf(r.VisibleAt))}
 }
 
 func reportFromRow(r dbq.Report) *domain.Report {

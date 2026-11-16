@@ -5,7 +5,8 @@ SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL;
 SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL FOR UPDATE;
 
 -- name: ListUsers :many
-SELECT * FROM users WHERE deleted_at IS NULL ORDER BY ord;
+-- Deleted (anonymized) accounts stay listed: their bookings and reviews still point at them.
+SELECT * FROM users ORDER BY ord;
 
 -- name: UserExists :one
 SELECT EXISTS (SELECT 1 FROM users WHERE id = $1);
@@ -52,11 +53,6 @@ ON CONFLICT (user_id) DO UPDATE SET name = EXCLUDED.name, area_id = EXCLUDED.are
 -- name: DeleteStore :exec
 DELETE FROM stores WHERE user_id = $1;
 
--- name: InsertDemoSession :exec
-INSERT INTO demo_sessions (token_hash, user_id) VALUES ($1, $2);
-
--- name: DemoSessionUser :one
-SELECT user_id FROM demo_sessions WHERE token_hash = $1;
 
 /* ------------------------------------------------------------ verification */
 

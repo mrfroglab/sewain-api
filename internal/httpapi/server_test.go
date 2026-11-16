@@ -6,14 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"image"
-	"image/color"
-	"image/png"
 	"io"
-	"log/slog"
 	"mime/multipart"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -21,48 +16,24 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/mrfroglab/sewain-api/internal/config"
-	"github.com/mrfroglab/sewain-api/internal/db/dbtest"
+	"github.com/mrfroglab/sewain-api/internal/app/apptest"
 	"github.com/mrfroglab/sewain-api/internal/domain"
-	"github.com/mrfroglab/sewain-api/internal/httpapi"
 	"github.com/mrfroglab/sewain-api/internal/service"
 )
 
 type api struct {
 	t    *testing.T
 	base string
+	h    *apptest.API
 }
 
 func newAPI(t *testing.T, scope string) *api {
 	t.Helper()
-	pool := dbtest.NewPool(t)
-	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/img/") {
-			_, _ = w.Write(pngBytes(t, 3))
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	t.Cleanup(web.Close)
-	cfg := config.Config{DemoMode: true, UploadDir: t.TempDir(), WebOrigin: web.URL, CORSOrigins: []string{"http://localhost:3000"}, SnapshotScope: scope}
-	svc := service.New(pool, service.Options{DemoMode: true, SnapshotScope: scope})
-	if _, err := svc.SeedIfEmpty(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(httpapi.New(cfg, svc, slog.New(slog.NewTextHandler(io.Discard, nil))).Routes())
-	t.Cleanup(srv.Close)
-	return &api{t: t, base: srv.URL}
+	h := apptest.New(t, apptest.Options{Demo: true, Scope: scope})
+	return &api{t: t, base: h.Base, h: h}
 }
 
-func pngBytes(t *testing.T, seed uint8) []byte {
-	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
-	img.Set(1, 1, color.RGBA{R: seed, A: 255})
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
-		t.Fatal(err)
-	}
-	return buf.Bytes()
-}
+func pngBytes(t *testing.T, seed uint8) []byte { return apptest.PNG(t, seed) }
 
 type resp struct {
 	status int
@@ -191,10 +162,11 @@ func iso(days int) string { return time.Now().AddDate(0, 0, days).In(domain.WIB)
 func TestAPIContract(t *testing.T) {
 	a := newAPI(t, service.ScopeFull)
 
-	// WebSocket change feed (hello + changed events).
+	// WebSocket change feed (hello + changed events) for Raka (bearer token as ?token=, demo only).
+	raka, bayu, admin, sinta := a.login("u-raka"), a.login("u-bayu"), a.login("u-admin"), a.login("u-sinta")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	ws, _, err := websocket.Dial(ctx, strings.Replace(a.base, "http", "ws", 1)+"/api/v1/events", nil)
+	ws, _, err := websocket.Dial(ctx, strings.Replace(a.base, "http", "ws", 1)+"/api/v1/events?token="+raka, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,10 +187,9 @@ func TestAPIContract(t *testing.T) {
 		}
 	}()
 
-	if r := a.do("GET", "/api/health", "", nil); r.status != 200 || r.body["db"] != true {
+	if r := a.do("GET", "/api/health", "", nil); r.status != 200 || r.body["ok"] != true || r.body["demoMode"] != true || r.body["clients"] == nil {
 		t.Fatalf("health: %s", r.raw)
 	}
-	raka, bayu, admin, sinta := a.login("u-raka"), a.login("u-bayu"), a.login("u-admin"), a.login("u-sinta")
 	if r := a.do("GET", "/api/v1/auth/me", raka, nil); r.status != 200 || r.body["user"].(map[string]any)["phone"] == "" {
 		t.Fatalf("me: %s", r.raw)
 	}
@@ -272,8 +243,8 @@ func TestAPIContract(t *testing.T) {
 	// Pay, then check-out photos uploaded over HTTP (server-side SHA-256), served with X-Content-SHA256.
 	a.ok(raka, "payBooking", "u-raka", id, "qris")
 	p := a.upload(bayu, "checkout", id, 1)
-	res, err := http.Get(a.base + p["src"].(string))
-	if err != nil || res.StatusCode != 200 || res.Header.Get("X-Content-SHA256") != p["sha256"] {
+	res, err := http.Get(a.base + p["src"].(string)) // signed URL (watermarked copy for a party)
+	if err != nil || res.StatusCode != 200 || res.Header.Get("X-Original-SHA256") != p["sha256"] {
 		t.Fatalf("photo served: %v %v", err, res.Header)
 	}
 	res.Body.Close()
@@ -411,7 +382,7 @@ func TestIdempotencyKeyHeader(t *testing.T) {
 		t.Fatalf("one booking expected: %d → %d", before, after)
 	}
 	body["args"].([]any)[1].(map[string]any)["endDate"] = iso(4)
-	if r3 := a.do("POST", "/api/v1/actions/createBooking", raka, body, "Idempotency-Key", "k-1"); r3.status != 422 {
+	if r3 := a.do("POST", "/api/v1/actions/createBooking", raka, body, "Idempotency-Key", "k-1"); r3.status != 409 {
 		t.Fatalf("reused key: %d %s", r3.status, r3.raw)
 	}
 }

@@ -81,18 +81,18 @@ func (t *txn) runJobs() {
 func (s *Service) Housekeeping(ctx context.Context) error {
 	return db.WithTx(ctx, s.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		q := dbq.New(tx)
-		if err := q.PruneIdempotencyKeys(ctx, s.opt.Now().Add(-24*time.Hour)); err != nil {
+		if err := q.PruneIdempotencyKeys(ctx, s.opt.Now().Add(-IdempotencyKeyRetention)); err != nil {
 			return err
 		}
 		return q.PruneChangeLog(ctx, 10_000)
 	})
 }
 
-// RunScheduler runs the jobs every interval until ctx ends (and housekeeping once an hour).
+// RunScheduler runs the time-based jobs every interval until ctx ends. Housekeeping and the retention job run in
+// the hourly retention runner (internal/app), under their own advisory lock.
 func (s *Service) RunScheduler(ctx context.Context, every time.Duration) {
 	tick := time.NewTicker(every)
 	defer tick.Stop()
-	lastHousekeeping := time.Time{}
 	for {
 		select {
 		case <-ctx.Done():
@@ -100,12 +100,6 @@ func (s *Service) RunScheduler(ctx context.Context, every time.Duration) {
 		case <-tick.C:
 			if _, err := s.RunJobs(ctx); err != nil && ctx.Err() == nil {
 				s.log.Error("jobs", "err", err)
-			}
-			if time.Since(lastHousekeeping) > time.Hour {
-				lastHousekeeping = time.Now()
-				if err := s.Housekeeping(ctx); err != nil && ctx.Err() == nil {
-					s.log.Error("housekeeping", "err", err)
-				}
 			}
 		}
 	}

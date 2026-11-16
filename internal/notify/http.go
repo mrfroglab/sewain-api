@@ -128,18 +128,29 @@ func (a *API) validate(in SubscriptionInput) error {
 }
 
 // SaveSubscription stores (or moves to userID) a browser subscription and trims old ones beyond the limit.
+// ErrSubscriptionTaken: the endpoint belongs to another account with different keys.
+var ErrSubscriptionTaken = UserError("Langganan push ini terdaftar di akun lain. Matikan lalu aktifkan lagi notifikasi di browser ini.")
+
 func SaveSubscription(ctx context.Context, db DB, userID string, in SubscriptionInput, userAgent string) error {
 	if len(userAgent) > 300 {
 		userAgent = userAgent[:300]
 	}
-	_, err := db.Exec(ctx, `
+	// An endpoint registered by another account only moves when the keys match too (same browser, other account
+	// signed in). Knowing someone's endpoint URL alone must not let an attacker take over or break their push
+	// (review L2).
+	tag, err := db.Exec(ctx, `
 		INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, user_agent)
 		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh,
-			auth = excluded.auth, user_agent = excluded.user_agent, updated_at = now()`,
+			auth = excluded.auth, user_agent = excluded.user_agent, updated_at = now()
+		WHERE push_subscriptions.user_id = excluded.user_id
+		   OR (push_subscriptions.p256dh = excluded.p256dh AND push_subscriptions.auth = excluded.auth)`,
 		userID, in.Endpoint, in.Keys.P256dh, in.Keys.Auth, userAgent)
 	if err != nil {
 		return fmt.Errorf("save subscription: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrSubscriptionTaken
 	}
 	_, err = db.Exec(ctx, `
 		DELETE FROM push_subscriptions WHERE id IN (
@@ -166,6 +177,10 @@ func (a *API) subscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := SaveSubscription(r.Context(), a.DB, userID, in, r.UserAgent()); err != nil {
+		if errors.Is(err, ErrSubscriptionTaken) {
+			writeErr(w, http.StatusConflict, ErrSubscriptionTaken.Error())
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "Gagal menyimpan langganan notifikasi. Coba lagi, ya.")
 		return
 	}
