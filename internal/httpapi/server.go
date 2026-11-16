@@ -120,6 +120,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/config", s.publicConfig)
 	mux.HandleFunc("GET /api/v1/state", s.state)
 	mux.HandleFunc("GET /api/v1/listings/search", s.search)
+	mux.HandleFunc("GET /api/v1/users/{id}", s.publicUser)
 	mux.Handle("GET /api/v1/events", d.Hub)
 
 	// Auth (OTP, sessions) and the DEMO_MODE persona login.
@@ -491,6 +492,23 @@ func (s *Server) demoControl(w http.ResponseWriter, r *http.Request, viewer *ser
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": ch.Version})
+}
+
+// publicUser is GET /api/v1/users/{id}: the public profile of one user (the users[] entry of a guest snapshot), their
+// active listings and the reviews about them that are shown. The same for every viewer, so publicly cacheable.
+func (s *Server) publicUser(w http.ResponseWriter, r *http.Request) {
+	page, err := s.svc.PublicUser(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.log.Error("public user", "err", err)
+		writeErr(w, http.StatusInternalServerError, "Gagal memuat profil.")
+		return
+	}
+	if page == nil {
+		writeErr(w, http.StatusNotFound, "Pengguna tidak ditemukan.")
+		return
+	}
+	w.Header().Set("Cache-Control", "public, max-age=60")
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": page.User, "listings": page.Listings, "reviews": page.Reviews})
 }
 
 func (s *Server) search(w http.ResponseWriter, r *http.Request) {

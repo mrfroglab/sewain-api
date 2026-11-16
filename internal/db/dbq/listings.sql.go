@@ -458,6 +458,68 @@ func (q *Queries) ListActiveListingsByOwnerForUpdate(ctx context.Context, ownerI
 	return items, nil
 }
 
+const listActiveListingsOfOwner = `-- name: ListActiveListingsOfOwner :many
+SELECT id, ord, slug, owner_id, title, category, description, condition_notes, price_per_day, price_per_hour, price_per_week, duration_discount, min_days, max_days, item_value, lat, lng, area_id, radius_km, handover, meeting_point, handover_hours, late_fee_per_day, late_fee_cap_percent, cancellation, special_rules, approval, auto_approve_min_rating, stock, vehicle, status, rent_count, base_rating, base_rating_count, created_at, updated_at FROM listing_rows WHERE owner_id = $1 AND status = 'aktif' ORDER BY ord DESC
+`
+
+// Public profile page (GET /api/v1/users/{id}): the owner's active listings.
+func (q *Queries) ListActiveListingsOfOwner(ctx context.Context, ownerID string) ([]ListingRow, error) {
+	rows, err := q.db.Query(ctx, listActiveListingsOfOwner, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListingRow{}
+	for rows.Next() {
+		var i ListingRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Ord,
+			&i.Slug,
+			&i.OwnerID,
+			&i.Title,
+			&i.Category,
+			&i.Description,
+			&i.ConditionNotes,
+			&i.PricePerDay,
+			&i.PricePerHour,
+			&i.PricePerWeek,
+			&i.DurationDiscount,
+			&i.MinDays,
+			&i.MaxDays,
+			&i.ItemValue,
+			&i.Lat,
+			&i.Lng,
+			&i.AreaID,
+			&i.RadiusKm,
+			&i.Handover,
+			&i.MeetingPoint,
+			&i.HandoverHours,
+			&i.LateFeePerDay,
+			&i.LateFeeCapPercent,
+			&i.Cancellation,
+			&i.SpecialRules,
+			&i.Approval,
+			&i.AutoApproveMinRating,
+			&i.Stock,
+			&i.Vehicle,
+			&i.Status,
+			&i.RentCount,
+			&i.BaseRating,
+			&i.BaseRatingCount,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listCollateralOptions = `-- name: ListCollateralOptions :many
 SELECT listing_id, id, position, kind, cards, deposit_mode, deposit_amount, deposit_percent, with_identity, description, estimated_value FROM collateral_options ORDER BY listing_id, position
 `

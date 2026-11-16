@@ -127,3 +127,7 @@ WHERE l.status = 'aktif' AND u.status = 'aktif' AND u.deleted_at IS NULL
         WHERE b.listing_id = l.id AND b.status IN ('ACCEPTED', 'ACTIVE')
           AND b.start_date <= sqlc.narg(end_date)::date AND sqlc.narg(start_date)::date <= b.end_date) < l.stock)
 ORDER BY l.id;
+
+-- name: ListActiveListingsOfOwner :many
+-- Public profile page (GET /api/v1/users/{id}): the owner's active listings.
+SELECT * FROM listing_rows WHERE owner_id = $1 AND status = 'aktif' ORDER BY ord DESC;
