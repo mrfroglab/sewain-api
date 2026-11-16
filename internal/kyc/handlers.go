@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"strconv"
@@ -47,7 +48,9 @@ func readPart(fh *multipart.FileHeader) (File, error) {
 // Submit handles POST /api/v1/kyc/submissions (multipart: ktp, selfie, nik, nameOnKtp).
 func (h Handlers) Submit(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 2*MaxFileBytes+(1<<20))
-	if err := r.ParseMultipartForm(1 << 20); err != nil {
+	// Bounded: the body is capped just above, at most 1 MB is held in memory (the rest spills to temp files)
+	// and net/http limits the number of parts and headers.
+	if err := r.ParseMultipartForm(1 << 20); err != nil { // #nosec G120 -- body capped by MaxBytesReader above
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
 			auth.WriteError(w, errFileTooBig)
@@ -56,7 +59,11 @@ func (h Handlers) Submit(w http.ResponseWriter, r *http.Request) {
 		auth.WriteError(w, userErr(http.StatusBadRequest, "Unggahan tidak valid. Kirim ulang formulirnya."))
 		return
 	}
-	defer r.MultipartForm.RemoveAll()
+	defer func() {
+		if err := r.MultipartForm.RemoveAll(); err != nil {
+			log.Printf("kyc: remove multipart temp files: %v", err)
+		}
+	}()
 	files := map[string]File{}
 	for _, k := range []string{FileKTP, FileSelfie} {
 		fhs := r.MultipartForm.File[k]
@@ -99,9 +106,10 @@ func (h Handlers) Status(w http.ResponseWriter, r *http.Request) {
 // Queue handles GET /api/v1/admin/kyc?status=pending&limit=50.
 func (h Handlers) Queue(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
-	if status == "" {
+	switch status {
+	case "":
 		status = StatusPending
-	} else if status == "all" {
+	case "all":
 		status = ""
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -161,7 +169,8 @@ func (h Handlers) File(w http.ResponseWriter, r *http.Request) {
 	hd.Set("Content-Disposition", "inline")
 	hd.Set("Content-Security-Policy", "default-src 'none'; sandbox")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(data)
+	// ct is allow-listed to JPEG/PNG/WebP by ReadFile, and nosniff + a sandbox CSP are set above.
+	_, _ = w.Write(data) // #nosec G705 -- image bytes with an allow-listed type, never HTML
 }
 
 // Blacklist handles POST /api/v1/admin/kyc/blacklist {"userId":"…"} or {"nik":"…"}, plus "reason".
