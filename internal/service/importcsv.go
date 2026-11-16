@@ -29,7 +29,7 @@ var ImportColumns = []ImportColumn{
 	{"lng", true, "Bujur."},
 	{"area_id", false, "ugm | pogung | sendowo | karangmalang | karangwuni | klebengan | terban | condongcatur (default: area pemilik)."},
 	{"radius_km", false, "Jangkauan penyedia (km, default 3)."},
-	{"handover", true, "Cara serah terima, dipisah |: cod | jemput | antar."},
+	{"handover", true, "Cara serah terima, dipisah |: cod | jemput | kurir | antar."},
 	{"collateral", true, "Jaminan, dipisah |: identitas:KTM/SIM, deposit:50000, deposit:25%, barang:<deskripsi>."},
 	{"photos", true, "Minimal 3 URL foto dipisah | (mis. /img/listings/a.webp atau /api/v1/photos/<id>)."},
 	{"stock", false, "Jumlah unit (akun Toko saja, default 1)."},
@@ -265,7 +265,7 @@ func (t *txn) importRow(get func(string) string, owners map[string]*domain.User,
 	// Listing.
 	in := domain.ListingInput{Title: domain.Ptr(get("title")), Category: domain.Ptr(get("category")), Photos: list("photos"),
 		PricePerDay: num("price_per_day", true), PricePerWeek: num("price_per_week", false), ItemValue: num("item_value", true),
-		Handover: list("handover")}
+		Handover: lower(list("handover"))}
 	if v := get("description"); v != "" {
 		in.Description = &v
 	}
@@ -296,8 +296,8 @@ func (t *txn) importRow(get func(string) string, owners map[string]*domain.User,
 		in.RadiusKm = r
 	}
 	for _, h := range in.Handover {
-		if h != "cod" && h != "jemput" && h != "antar" {
-			fail("handover: " + h + " tidak dikenal (cod | jemput | antar).")
+		if !domain.Contains(domain.HandoverMethods, h) {
+			fail("handover: " + h + " tidak dikenal (" + strings.Join(domain.HandoverMethods, " | ") + ").")
 		}
 	}
 	rules := domain.ListingRules{Cancellation: get("cancellation")}
@@ -373,4 +373,11 @@ func parseCollateral(spec string) (domain.CollateralOption, error) {
 		return domain.CollateralOption{Kind: "barang", Description: &arg}, nil
 	}
 	return domain.CollateralOption{}, fmt.Errorf("jenis %q tidak dikenal (identitas | deposit | barang)", kind)
+}
+
+func lower(xs []string) []string {
+	for i, x := range xs {
+		xs[i] = strings.ToLower(x)
+	}
+	return xs
 }

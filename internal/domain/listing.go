@@ -279,6 +279,11 @@ func NeedsManualApproval(l *Listing, rules CollateralRules) bool {
 // far from int64 overflow and is above any item rented peer to peer.
 const MaxRupiah int64 = 10_000_000_000 // Rp10 miliar
 
+// HandoverMethods are the ways to hand an item over (web HandoverMethod in sewain-web/src/lib/types.ts): cash on
+// delivery at a meeting point, pick-up at the provider, courier, and delivery by the provider. The listing wizard
+// offers the first three; the CSV import accepts all four.
+var HandoverMethods = []string{"cod", "jemput", "kurir", "antar"}
+
 const (
 	MaxRentalDays     = 365
 	MaxListingStock   = 1000
@@ -340,7 +345,7 @@ func validateListingBounds(l *Listing) error {
 		return Fail(fmt.Sprintf("Maksimal %d bentuk jaminan.", maxCollateralOpts))
 	}
 	for _, h := range l.Handover {
-		if h != "cod" && h != "jemput" && h != "kurir" && h != "antar" { // web: cod | jemput | kurir; CSV import: antar
+		if !Contains(HandoverMethods, h) {
 			return Fail("Cara serah terima tidak dikenal.")
 		}
 	}
