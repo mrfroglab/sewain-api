@@ -1,0 +1,61 @@
+# Throwaway stack to load-test a local build (loadtest/README.md "Stack sementara"). Same limits as staging
+# (api 256m, db 384m), DEMO_MODE + APP_ENV=staging, ports on 127.0.0.1 only, all names prefixed sewain-lt-.
+# Secrets come from an env file the runner generates in a temp dir (never committed).
+#
+#   API_IMAGE=sewain-lt-api:local docker compose -p sewain-lt --env-file "$TMP/lt.env" -f loadtest/stack/docker-compose.yml up -d --wait
+name: sewain-lt
+services:
+  db:
+    image: postgis/postgis:16-3.4-alpine
+    container_name: sewain-lt-db
+    environment:
+      POSTGRES_USER: sewain
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: sewain
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sewain -d sewain"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    mem_limit: ${DB_MEM:-384m}
+    cpus: ${DB_CPUS:-0}
+    networks: [lt]
+
+  api:
+    image: ${API_IMAGE:-sewain-lt-api:local}
+    container_name: sewain-lt-api
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PORT: "8080"
+      APP_ENV: staging
+      DEMO_MODE: "true"
+      SNAPSHOT_SCOPE: scoped
+      SNAPSHOT_USERS: ${SNAPSHOT_USERS:-all}
+      DATABASE_URL: postgres://sewain:${DB_PASSWORD}@sewain-lt-db:5432/sewain?sslmode=disable${DB_URL_PARAMS:-}
+      UPLOAD_DIR: /data/uploads
+      WEB_ORIGIN: http://127.0.0.1:9
+      CORS_ORIGINS: https://sewain-staging.hallojanu.me
+      PUBLIC_URL: https://sewain-staging.hallojanu.me
+      TRUSTED_PROXY_CIDRS: 172.31.250.0/24
+      OTP_PROVIDER: echo
+      OTP_PEPPER: ${OTP_PEPPER}
+      NIK_PEPPER: ${NIK_PEPPER}
+      KYC_KEYS: ${KYC_KEYS}
+      MEDIA_SIGNING_KEY: ${MEDIA_SIGNING_KEY}
+      TERMS_VERSION: lt
+      PRIVACY_VERSION: lt
+      MAIL_PROVIDER: none
+    tmpfs: ["/data/uploads:uid=65532,gid=65532"]
+    ports: ["127.0.0.1:18480:8080"]
+    mem_limit: ${API_MEM:-256m}
+    cpus: ${API_CPUS:-0}
+    networks: [lt]
+
+networks:
+  lt:
+    name: sewain-lt-net
+    ipam:
+      config: [{ subnet: 172.31.250.0/24 }]
